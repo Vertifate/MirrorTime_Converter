@@ -6,22 +6,47 @@ import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 
-def _get_raw_timestamps(video_path):
+import subprocess
+
+def _get_raw_timestamps(video_path, interval=None):
     """
     使用 ffprobe 快速获取视频每一帧的原始 PTS 时间戳。
-    此函数不解码图像，只读取元数据，速度非常快。
+    :param interval: (start_sec, end_sec) 元组，若指定则只读取该时间段。
     """
+    cmd = [
+        "ffprobe",
+        "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "frame=pkt_pts_time",
+        "-of", "default=noprint_wrappers=1:nokey=1"
+    ]
+
+    if interval:
+        # 添加读取区间参数，格式: start%end
+        # 注意: ffprobe 的 read_intervals 实际上更像是 seek，可能不完全精确，但对于获取时间戳足够了
+        cmd.extend(["-read_intervals", f"{interval[0]}%{interval[1]}"])
+    
+    cmd.append(video_path)
+
     try:
-        probe = ffmpeg.probe(
-            video_path,
-            select_streams='v:0',
-            show_entries='frame=pkt_pts_time'
-        )
+        # 直接获取原始字节输出
+        output = subprocess.check_output(cmd)
         
-        timestamps = [float(frame['pkt_pts_time']) for frame in probe.get('frames', []) if 'pkt_pts_time' in frame]
+        # 解码并按行分割，转换为浮点数
+        # 过滤掉空行
+        timestamps = [
+            float(line) 
+            for line in output.decode('utf-8').splitlines() 
+            if line.strip()
+        ]
+        
         return timestamps
-    except ffmpeg.Error as e:
-        print(f"[FFmpeg 错误] 无法读取 {os.path.basename(video_path)}: {e.stderr.decode() if e.stderr else str(e)}")
+
+    except subprocess.CalledProcessError as e:
+        print(f"[FFmpeg 错误] 无法读取 {os.path.basename(video_path)}: {e}")
+        return None
+    except ValueError as e:
+        print(f"[数据错误] 解析时间戳失败 {os.path.basename(video_path)}: {e}")
         return None
     except Exception as e:
         print(f"[未知错误] 在处理 {os.path.basename(video_path)} 时发生: {e}")
@@ -31,14 +56,19 @@ class FrameSnapper:
     """
     将理想的时间戳列表“吸附”到每个视频最近的真实帧时间上。
     """
-    def __init__(self, alignment_data, max_workers=os.cpu_count()):
+    def __init__(self, alignment_data, max_workers=os.cpu_count(), start_frame=None, end_frame=None):
         """
         初始化 FrameSnapper。
         
         :param alignment_data: 从 alignment_results.json 加载的数据。
         :param max_workers: 用于并行扫描视频的线程数。
+        :param start_frame: 起始帧索引 (int)，用于优化扫描范围
+        :param end_frame: 结束帧索引 (int)，用于优化扫描范围
         """
         self.alignment_data = alignment_data
+        self.start_frame = start_frame
+        self.end_frame = end_frame
+        
         self.video_frame_maps = {}
         print("\n" + "="*20 + " 预加载视频元数据 " + "="*20)
         self._preload_all_frame_maps(max_workers)
@@ -46,11 +76,47 @@ class FrameSnapper:
     def _preload_all_frame_maps(self, max_workers):
         """
         使用多线程并行扫描所有视频，获取并缓存它们的真实帧时间戳。
+        优化：根据 start_frame/end_frame 和 alignment data 计算每个视频的扫描时间段。
         """
-        video_paths = list(set([item['file'] for item in self.alignment_data if 'file' in item]))
+        tasks = []
         
+        # 将 alignment_data 转为字典方便查找
+        align_map = { item['file']: item for item in self.alignment_data if 'file' in item }
+        
+        for path in align_map.keys():
+            interval = None
+            
+            # 如果指定了帧范围，计算该视频需要扫描的时间段
+            if self.start_frame is not None and self.end_frame is not None:
+                item = align_map[path]
+                sync_ts = item.get('synchronized_timestamps', [])
+                offset = item.get('offset_seconds', 0.0)
+                drift = item.get('drift_scale', 1.0)
+                
+                if sync_ts and len(sync_ts) > self.end_frame:
+                    # 获取理想时间范围
+                    # 注意：start_frame 可能越界，需做 max(0)
+                    s_idx = max(0, self.start_frame)
+                    e_idx = min(len(sync_ts) - 1, self.end_frame)
+                    
+                    t_start_ideal = sync_ts[s_idx]
+                    t_end_ideal = sync_ts[e_idx]
+                    
+                    # 转换回该视频的真实时间: Real = (Ideal - Offset) / Drift
+                    t_start_real = (t_start_ideal - offset) / drift
+                    t_end_real = (t_end_ideal - offset) / drift
+                    
+                    # 添加安全余量 (e.g., +/- 10s) 
+                    # ffprobe read_intervals start%end
+                    safe_start = max(0, t_start_real - 10.0)
+                    safe_end = t_end_real + 10.0
+                    
+                    interval = (safe_start, safe_end)
+            
+            tasks.append((path, interval))
+
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_path = {executor.submit(_get_raw_timestamps, path): path for path in video_paths}
+            future_to_path = {executor.submit(_get_raw_timestamps, path, interval): path for path, interval in tasks}
             
             with tqdm(total=len(future_to_path), desc="[预加载] 扫描视频帧时间戳") as pbar:
                 for future in as_completed(future_to_path):
@@ -79,7 +145,7 @@ class FrameSnapper:
         indices = np.argmin(diffs, axis=0)
         snapped_timestamps = real_timestamps[indices]
         
-        return snapped_timestamps.tolist()
+        return snapped_timestamps.tolist(), indices.tolist()
 
     def snap_all_videos(self):
         """
@@ -100,20 +166,22 @@ class FrameSnapper:
             
             if not ideal_timestamps:
                 print(f"警告: 视频 {os.path.basename(video_path)} 没有 'synchronized_timestamps'，已跳过。")
-                snapped_ts = []
+                snapped_ts, snapped_indices = [], []
             elif real_timestamps is None:
                 print(f"警告: 视频 {os.path.basename(video_path)} 没有可用的真实帧时间地图，已跳过。")
-                snapped_ts = []
+                snapped_ts, snapped_indices = [], []
             else:
-                snapped_ts = self._snap_timestamps(ideal_timestamps, real_timestamps)
+                snapped_ts, snapped_indices = self._snap_timestamps(ideal_timestamps, real_timestamps)
 
             # 存储详细结果
             all_snapped_results[os.path.basename(video_path)] = {
                 'file_path': video_path,
+                'offset_seconds': result.get('offset_seconds', 0.0),
+                'drift_scale': result.get('drift_scale', 1.0),
                 'snapped_timestamps': snapped_ts,
                 'mapping': [
-                    {'ideal_time': ideal, 'snapped_time': snapped} 
-                    for ideal, snapped in zip(ideal_timestamps, snapped_ts)
+                    {'ideal_time': ideal, 'snapped_time': snapped, 'frame_idx': int(idx)} 
+                    for ideal, snapped, idx in zip(ideal_timestamps, snapped_ts, snapped_indices)
                 ]
             }
         

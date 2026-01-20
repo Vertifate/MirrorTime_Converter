@@ -2,375 +2,253 @@ import os
 import json
 import argparse
 import shutil
-import cv2
 import sys
-import torch
-import torch.multiprocessing as mp
-from queue import Empty
+import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 import ffmpeg
+from PIL import Image, PngImagePlugin
 
 # 确保可以导入同一目录下的模块
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-def worker_inference_process(gpu_id, checkpoint_dir, task_queue, result_queue, device_str, cpu_threads): # <--- [新增参数 cpu_threads]
+def _get_raw_timestamps(video_path):
     """
-    Step 4 的子进程工作函数 - 真正延迟导入版
+    使用 ffprobe 快速获取视频每一帧的原始 PTS 时间戳。
     """
     try:
-        # [关键修改] 1. 设置环境变量，严格限制 OpenMP 和 MKL 的线程数
-        os.environ["OMP_NUM_THREADS"] = str(cpu_threads)
-        os.environ["MKL_NUM_THREADS"] = str(cpu_threads)
-
-        # 1. [最优先] 设置环境变量隔离显卡
-        # 此时还没有 import EMAVFIPredictor，所以 torch.cuda 绝对没有被初始化
-        if gpu_id >= 0:
-            os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-            effective_device_str = "cuda:0" # 隔离后，物理卡 N 变成了逻辑卡 0
-        else:
-            effective_device_str = "cpu"
-
-        # 2. [安全检查] 确认隔离成功
-        # 此时 torch 应该只能看到 1 张卡
-        import torch # 确保 torch 已导入
-        if gpu_id >= 0:
-            if torch.cuda.device_count() != 1:
-                raise RuntimeError(f"致命错误：显卡隔离失败！Worker {os.getpid()} 应该只看到 1 张卡，但看到了 {torch.cuda.device_count()} 张。")
-
-        # [关键修改] 2. 再次通过 API 强制限制线程 (双重保险)
-        import cv2
-        cv2.setNumThreads(cpu_threads)
-        torch.set_num_threads(cpu_threads)
-
-        # 3. [延迟导入] 现在环境已经安全了，再导入重型模型库
-        # 将 import 移到这里！
-        try:
-            # 必须把这一行从文件顶层移到这里
-            from ema_vfi_predictor import EMAVFIPredictor 
-        except ImportError as e:
-             result_queue.put({'status': 'fatal', 'msg': f"ImportError inside worker: {e}"})
-             return
-
-        # 4. 初始化模型
-        # 注意：使用 effective_device_str ("cuda:0")
-        model = EMAVFIPredictor(checkpoint_dir=checkpoint_dir, device=effective_device_str)
-        
-        print(f"[Worker-{os.getpid()}] Ready on {effective_device_str} (Physical: {gpu_id})")
-
-        while True:
-            try:
-                task = task_queue.get(timeout=1.0)
-            except Empty:
-                break
-            
-            img0_path, img1_path, output_path, timestep, vid_name = task
-            
-            try:
-                if not os.path.exists(img0_path) or not os.path.exists(img1_path):
-                    result_queue.put({'status': 'error', 'msg': f"Missing input files for {vid_name}"})
-                    continue
-
-                img0 = cv2.imread(img0_path)
-                img1 = cv2.imread(img1_path)
-                
-                if img0 is None or img1 is None:
-                    result_queue.put({'status': 'error', 'msg': f"Read failed for {vid_name}"})
-                    continue
-
-                # 推理
-                result_img = model.predict(img0, img1, timestep)
-                
-                # 保存
-                cv2.imwrite(output_path, result_img, [cv2.IMWRITE_PNG_COMPRESSION, 1])
-                cv2.imwrite(output_path, result_img)
-                
-                result_queue.put({'status': 'ok'})
-                
-            except RuntimeError as re:
-                if 'out of memory' in str(re):
-                    torch.cuda.empty_cache()
-                    result_queue.put({'status': 'error', 'msg': f"OOM on {vid_name} (GPU {gpu_id}): {re}"})
-                else:
-                    result_queue.put({'status': 'error', 'msg': f"RuntimeError on {vid_name}: {re}"})
-            except Exception as e:
-                result_queue.put({'status': 'error', 'msg': f"Error on {vid_name}: {e}"})
-
+        probe = ffmpeg.probe(
+            video_path,
+            select_streams='v:0',
+            show_entries='frame=pkt_pts_time'
+        )
+        timestamps = [float(frame['pkt_pts_time']) for frame in probe.get('frames', []) if 'pkt_pts_time' in frame]
+        return np.array(timestamps)
+    except ffmpeg.Error as e:
+        print(f"[FFmpeg 错误] 无法读取 {os.path.basename(video_path)}: {e.stderr.decode() if e.stderr else str(e)}")
+        return None
     except Exception as e:
-        import traceback
-        result_queue.put({'status': 'fatal', 'msg': f"Worker crashed: {e}\n{traceback.format_exc()}"})
+        print(f"[未知错误] 在处理 {os.path.basename(video_path)} 时发生: {e}")
+        return None
 
-class ExtractionExecutor:
-    def __init__(self, plan_data, video_dir, output_dir, cache_dir, checkpoint_dir, 
-                 output_structure='by_frame', start_frame=None, end_frame=None, 
-                 device='cuda', resolution_scale=1.0, workers_per_gpu=2, cpu_threads=1):
-        
-        self.full_plan = plan_data
+class SimpleExtractor:
+    def __init__(self, snapped_data, video_dir, output_dir, workers=os.cpu_count(), 
+                 start_frame=None, end_frame=None, output_structure='by_frame'):
+        """
+        简化版提取器：直接根据 snapped_data 提取帧。
+        """
+        self.snapped_data = snapped_data
         self.video_dir = video_dir
         self.output_dir = output_dir
-        self.cache_dir = cache_dir
-        self.checkpoint_dir = checkpoint_dir
-        self.output_structure = output_structure
+        self.workers = workers
         self.start_frame = start_frame
         self.end_frame = end_frame
-        self.resolution_scale = resolution_scale
-        self.workers_per_gpu = workers_per_gpu
-        self.cpu_threads = cpu_threads
+        self.output_structure = output_structure
         
-        if device == 'cpu':
-            self.num_gpus = 0
-            self.device_list = ['cpu']
-        else:
-            if torch.cuda.is_available():
-                self.num_gpus = torch.cuda.device_count()
-                self.device_list = [f'cuda:{i}' for i in range(self.num_gpus)]
-                print(f"\n[System] Detected {self.num_gpus} GPUs. Activating multi-GPU parallel mode.")
-            else:
-                print("\n[System] No GPU detected. Falling back to CPU mode.")
-                self.num_gpus = 0
-                self.device_list = ['cpu']
+        # 缓存每个视频的完整时间戳，用于将时间转换为索引
+        self.video_full_timestamps = {}
 
-        self.filtered_plan = {}
-        
-    def analyze_requirements(self):
-        """Step 1: 筛选计划范围"""
-        print("\n" + "="*20 + " Step 1: Analyzing & Filtering " + "="*20)
-        # ... (保持原有逻辑不变)
-        sorted_keys = sorted(self.full_plan.keys())
-        for key in sorted_keys:
-            try:
-                frame_idx = int(key.split('_')[1])
-            except (IndexError, ValueError):
-                continue
-            if self.start_frame is not None and frame_idx < self.start_frame: continue
-            if self.end_frame is not None and frame_idx > self.end_frame: continue
-            self.filtered_plan[key] = self.full_plan[key]
-        print(f"Total frames in plan: {len(self.full_plan)}")
-        print(f"Frames to process: {len(self.filtered_plan)}")
-
-    def populate_cache(self):
-        """Step 2: 并行提取源帧"""
-        # ... (保持原有逻辑不变，此处省略以节省空间，直接使用之前提供的 populate_cache 和 _ffmpeg_extract_worker 代码即可)
-        print("\n" + "="*20 + " Step 2: Populating Cache (Multi-GPU FFmpeg) " + "="*20)
-        os.makedirs(self.cache_dir, exist_ok=True)
-        video_map = {}
-        for root, dirs, files in os.walk(self.video_dir):
-            for f in files:
-                if f.lower().endswith(('.mov', '.mp4', '.avi', '.m4v')):
-                    video_map[f] = os.path.join(root, f)
-        
-        video_indices_needed = {} 
-        for frame_key, frame_data in self.filtered_plan.items():
-            for vid_name, action_data in frame_data['videos'].items():
-                if self.output_structure == 'by_frame':
-                    out_path = os.path.join(self.output_dir, frame_key, f"{os.path.splitext(vid_name)[0]}.png")
-                else: 
-                    out_path = os.path.join(self.output_dir, os.path.splitext(vid_name)[0], f"{frame_key}.png")
-                if os.path.exists(out_path): continue
-
-                if vid_name not in video_indices_needed: video_indices_needed[vid_name] = set()
-                action = action_data.get('action')
-                if action == 'extract':
-                    video_indices_needed[vid_name].add(action_data['frame_idx'])
-                elif action == 'interpolate':
-                    video_indices_needed[vid_name].add(action_data['prev_frame_idx'])
-                    video_indices_needed[vid_name].add(action_data['next_frame_idx'])
-
-        tasks = []
-        for i, (vid_name, indices) in enumerate(video_indices_needed.items()):
-            if not indices: continue
-            if vid_name not in video_map: continue
-            # FFmpeg 提取任务不需要非常严格的 GPU 绑定，轮询即可
-            assigned_gpu = i % self.num_gpus if self.num_gpus > 0 else None
-            tasks.append({'vid_name': vid_name, 'full_path': video_map[vid_name], 'indices': sorted(list(indices)), 'gpu_id': assigned_gpu})
-
-        if not tasks:
-            print("所有所需帧已缓存，跳过提取。")
-            return
-
-        max_workers = (self.num_gpus * 4) if self.num_gpus > 0 else os.cpu_count() # FFmpeg 可以多开一点
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(self._ffmpeg_extract_worker, t) for t in tasks]
-            for _ in tqdm(as_completed(futures), total=len(tasks), desc="[Step 2] Extracting"):
-                pass
+    def _preload_timestamps(self, video_paths):
+        """并行获取所需视频的完整时间戳"""
+        with ThreadPoolExecutor(max_workers=self.workers) as executor:
+            future_to_path = {executor.submit(_get_raw_timestamps, path): path for path in video_paths}
+            
+            with tqdm(total=len(future_to_path), desc="[准备] 扫描视频帧索引") as pbar:
+                for future in as_completed(future_to_path):
+                    path = future_to_path[future]
+                    try:
+                        self.video_full_timestamps[path] = future.result()
+                    except Exception as e:
+                        print(f"Error process {path}: {e}")
+                    pbar.update(1)
 
     def _ffmpeg_extract_worker(self, task):
-         # ... (保持之前提供的逻辑)
-         vid_name = task['vid_name']
-         full_path = task['full_path']
-         indices = task['indices']
-         video_cache_dir = os.path.join(self.cache_dir, vid_name)
-         os.makedirs(video_cache_dir, exist_ok=True)
-         final_indices = [idx for idx in indices if not os.path.exists(os.path.join(video_cache_dir, f"frame_{idx:06d}.png"))]
-         if not final_indices: return
-         
-         chunk_size = 50
-         for i in range(0, len(final_indices), chunk_size):
-            chunk = final_indices[i:i+chunk_size]
-            select_expr = "+".join([f"eq(n,{idx})" for idx in chunk])
-            temp_pattern = os.path.join(video_cache_dir, "temp_%04d.png")
+        """
+        FFmpeg 提取单个视频的一组帧，并写入元数据。
+        task: { 'vid_name': ..., 'full_path': ..., 'indices': [ (frame_idx, output_path, meta_dict), ... ] }
+        """
+        vid_name = task['vid_name']
+        full_path = task['full_path']
+        indices = task['indices']
+        
+        if not indices: return
+
+        # 分块处理以避免命令行过长
+        chunk_size = 50
+        for i in range(0, len(indices), chunk_size):
+            chunk = indices[i:i+chunk_size] # List of (frame_idx, output_abs_path, meta_dict)
+            
+            # 构造 select 表达式: eq(n,idx1)+eq(n,idx2)...
+            select_expr = "+".join([f"eq(n,{idx})" for idx, _, _ in chunk])
+            
+            # 使用 temp pattern 输出
+            temp_dir = os.path.join(self.output_dir, "temp_extract", vid_name)
+            os.makedirs(temp_dir, exist_ok=True)
+            temp_pattern = os.path.join(temp_dir, f"chunk_{i}_%04d.png")
+            
             try:
-                (ffmpeg.input(full_path).filter('select', select_expr)
-                 .output(temp_pattern, vsync=0, start_number=0).overwrite_output().run(quiet=True))
-                for j, true_idx in enumerate(chunk):
+                # 运行 FFmpeg
+                (ffmpeg.input(full_path)
+                 .filter('select', select_expr)
+                 .output(temp_pattern, vsync=0, start_number=0)
+                 .overwrite_output()
+                 .run(quiet=True))
+                 
+                # 将临时文件重命名/移动到最终目标路径，并注入元数据
+                for j, (true_idx, target_path, meta) in enumerate(chunk):
                     src = temp_pattern % j
-                    dst = os.path.join(video_cache_dir, f"frame_{true_idx:06d}.png")
-                    if os.path.exists(src): os.rename(src, dst)
+                    if os.path.exists(src):
+                        os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                        
+                        # --- 元数据注入逻辑 ---
+                        try:
+                            with Image.open(src) as img:
+                                png_info = PngImagePlugin.PngInfo()
+                                
+                                # 写入基础元数据
+                                png_info.add_text("MirrorTime_IdealTime", f"{meta['ideal_time']:.6f}")
+                                png_info.add_text("MirrorTime_RealTime", f"{meta['real_time']:.6f}")
+                                png_info.add_text("MirrorTime_Timestamp", f"{meta['global_time']:.6f}")
+                                png_info.add_text("MirrorTime_TimeError", f"{meta['time_error']:.6f}")
+                                
+                                # 将原图（带元数据）保存到目标路径
+                                img.save(target_path, pnginfo=png_info)
+                        except Exception as e:
+                            print(f"[Metadata Error] {target_path}: {e}")
+                            # 如果元数据写入失败，至少尝试直接移动文件
+                            if not os.path.exists(target_path):
+                                shutil.move(src, target_path)
+                                
             except Exception as e:
                 print(f"[FFmpeg Error] {vid_name}: {e}")
+        
+        # 清理临时目录
+        shutil.rmtree(os.path.join(self.output_dir, "temp_extract", vid_name), ignore_errors=True)
 
-    def execute_processing(self):
-        """Step 3 & 4: 多GPU推理"""
-        print("\n" + "="*20 + " Step 3: Preparing Tasks " + "="*20)
+    def execute(self):
+        print("\n" + "="*20 + " 开始执行帧提取 (含元数据) " + "="*20)
         
-        inference_tasks = [] 
-        copy_tasks = []      
+        # 1. 收集需要提取的任务
+        tasks_by_video = {}
         
-        sorted_frames = sorted(self.filtered_plan.keys())
-        for frame_key in sorted_frames:
-            frame_data = self.filtered_plan[frame_key]
-            for vid_name, action_data in frame_data['videos'].items():
+        # 遍历 snapped_data (按视频组织的)
+        for vid_name, data in self.snapped_data.items():
+            file_path = data.get('file_path')
+            mapping = data.get('mapping', [])
+            
+            if not file_path or not mapping: continue
+            
+            for i, item in enumerate(mapping):
+                # 过滤帧范围
+                if self.start_frame is not None and i < self.start_frame: continue
+                if self.end_frame is not None and i > self.end_frame: continue
+                
+                # 计算输出路径
+                frame_key = f"frame_{i:06d}"
                 if self.output_structure == 'by_frame':
                     out_path = os.path.join(self.output_dir, frame_key, f"{os.path.splitext(vid_name)[0]}.png")
-                else: 
+                else:
                     out_path = os.path.join(self.output_dir, os.path.splitext(vid_name)[0], f"{frame_key}.png")
                 
+                # 如果已存在则跳过
                 if os.path.exists(out_path): continue
                 
-                video_cache_dir = os.path.join(self.cache_dir, vid_name)
-                action = action_data.get('action')
+                if file_path not in tasks_by_video:
+                    tasks_by_video[file_path] = []
                 
-                if action == 'extract':
-                    idx = action_data.get('frame_idx')
-                    src_path = os.path.join(video_cache_dir, f"frame_{idx:06d}.png")
-                    copy_tasks.append((src_path, out_path))
-                elif action == 'interpolate':
-                    idx_prev = action_data.get('prev_frame_idx')
-                    idx_next = action_data.get('next_frame_idx')
-                    step = action_data['interp_step']
-                    src_prev = os.path.join(video_cache_dir, f"frame_{idx_prev:06d}.png")
-                    src_next = os.path.join(video_cache_dir, f"frame_{idx_next:06d}.png")
-                    inference_tasks.append((src_prev, src_next, out_path, step, vid_name))
+                # 获取对齐参数
+                offset = data.get('offset_seconds', 0.0)
+                drift = data.get('drift_scale', 1.0)
+                
+                # 准备元数据所需信息
+                ideal_time = item['ideal_time']
+                snapped_time = item['snapped_time']
+                
+                # 计算最终的全局同步时间 (Real Global Time)
+                # 公式: Global = Local * Drift + Offset
+                global_time = snapped_time * drift + offset
+                
+                time_error = snapped_time - ideal_time
+                
+                meta_info = {
+                    'ideal_time': ideal_time,
+                    'real_time': snapped_time,
+                    'global_time': global_time,
+                    'time_error': time_error
+                }
+                
+                # 存储暂时只能用 time 来找 index
+                tasks_by_video[file_path].append( { 
+                    'time': snapped_time, 
+                    'out_path': out_path,
+                    'meta': meta_info,
+                    'frame_idx': item.get('frame_idx')
+                } )
 
-        print(f"Tasks: Inference (GPU)={len(inference_tasks)}, Copy (IO)={len(copy_tasks)}")
-        
-        if copy_tasks:
-            print("Executing Copy Tasks...")
-            for src, dst in tqdm(copy_tasks, desc="Copying Frames"):
-                if os.path.exists(src):
-                    os.makedirs(os.path.dirname(dst), exist_ok=True)
-                    shutil.copy2(src, dst)
-        
-        if not inference_tasks:
+        if not tasks_by_video:
+            print("所有帧已存在或无任务。")
             return
 
-        print("\n" + "="*20 + " Step 4: Multi-GPU Inference " + "="*20)
+        # 2. 检查索引完整性并决定是否需要扫描
+        has_indices = all(t.get('frame_idx') is not None for tasks in tasks_by_video.values() for t in tasks)
         
-        # [优化] 使用 spawn context 的原生 Queue，而不是 Manager().Queue()，速度更快
-        ctx = mp.get_context('spawn')
-        task_queue = ctx.Queue()
-        result_queue = ctx.Queue()
-        
-        for t in inference_tasks:
-            task_queue.put(t)
-            
-        processes = []
-        
-        # [优化] 计算总进程数：GPU数量 * 每卡Worker数
-        if self.num_gpus > 0:
-            total_workers = self.num_gpus * self.workers_per_gpu
-            print(f"Spawning {total_workers} workers ({self.workers_per_gpu} per GPU) on CUDA...")
+        if not has_indices:
+            print("准备视频时间轴数据 (未发现缓存索引)...")
+            self._preload_timestamps(list(tasks_by_video.keys()))
         else:
-            total_workers = max(1, os.cpu_count() // 2)
-            print(f"Spawning {total_workers} workers on CPU...")
+            print("[优化] 发现缓存的帧索引，跳过时间轴扫描。")
 
-        for i in range(total_workers):
-            if self.num_gpus > 0:
-                # 轮询分配: Worker 0->GPU0, Worker 1->GPU1, Worker 2->GPU0 ...
-                gpu_index = i % self.num_gpus
-                dev_str = f"cuda:{gpu_index}"
-                gpu_id = gpu_index
-            else:
-                dev_str = "cpu"
-                gpu_id = -1
-                
-            p = ctx.Process(
-                target=worker_inference_process,
-                args=(gpu_id, self.checkpoint_dir, task_queue, result_queue, dev_str, self.cpu_threads) # <--- [传递参数到子进程]
-            )
-            p.start()
-            processes.append(p)
+        # 3. 转换时间为索引，并构建最终任务列表
+        final_tasks = []
+        
+        for file_path, items in tasks_by_video.items():
+            vid_name = os.path.basename(file_path)
             
-        total_inf = len(inference_tasks)
-        with tqdm(total=total_inf, desc="[Step 4] AI Interpolating") as pbar:
-            completed = 0
-            while completed < total_inf:
-                try:
-                    res = result_queue.get(timeout=2.0)
-                    if res['status'] == 'ok':
-                        pbar.update(1)
-                        completed += 1
-                    elif res['status'] == 'fatal':
-                        print(f"\n[FATAL] {res['msg']}")
-                        break
-                    else:
-                        print(f"\n[Error] {res['msg']}")
-                        pbar.update(1)
-                        completed += 1
-                except Empty:
-                    if not any(p.is_alive() for p in processes):
-                        print("All workers died.")
-                        break
+            indices_list = []
+            
+            # 分支路径：有索引直接用，无索引扫描找最近
+            if has_indices:
+                for item in items:
+                     indices_list.append( (item['frame_idx'], item['out_path'], item['meta']) )
+            else:
+                timestamps = self.video_full_timestamps.get(file_path)
+                if timestamps is None:
+                    print(f"跳过 {vid_name} (无法读取元数据)")
+                    continue
+                    
+                for item in items:
+                    t = item['time']
+                    # 寻找最近的索引
+                    idx = (np.abs(timestamps - t)).argmin()
+                    indices_list.append( (idx, item['out_path'], item['meta']) )
+            
+            if not indices_list: continue
+            
+            # 排序索引
+            indices_list.sort(key=lambda x: x[0])
+            
+            final_tasks.append({
+                'vid_name': vid_name,
+                'full_path': file_path,
+                'indices': indices_list
+            })
+
+        # 4. 并行执行提取
+        print(f"提交 {len(final_tasks)} 个视频提取任务...")
+        with ThreadPoolExecutor(max_workers=self.workers) as executor:
+            futures = [executor.submit(self._ffmpeg_extract_worker, t) for t in final_tasks]
+            for _ in tqdm(as_completed(futures), total=len(final_tasks), desc="[提取] Processing Videos"):
+                pass
         
-        for p in processes:
-            p.join()
-        
-        if self.device_list[0].startswith('cuda'):
-            torch.cuda.empty_cache()
+        # 清理
+        temp_root = os.path.join(self.output_dir, "temp_extract")
+        if os.path.exists(temp_root):
+            shutil.rmtree(temp_root)
+            
+        print("提取完成。")
 
 def main():
-    try:
-        mp.set_start_method('spawn', force=True)
-    except RuntimeError:
-        pass
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument("plan_json", help="Path to extraction_plan.json")
-    parser.add_argument("video_dir", help="Original video dir")
-    parser.add_argument("output_dir", help="Output dir")
-    parser.add_argument("--checkpoint_dir", default="./InterpAny-Clearer/checkpoints/EMA-VFI/DR-EMA-VFI/train_sdi_log")
-    parser.add_argument("--cache_dir", default=None)
-    parser.add_argument("--structure", default='by_frame')
-    parser.add_argument("--start_frame", type=int, default=None)
-    parser.add_argument("--end_frame", type=int, default=None)
-    parser.add_argument("--device", default="cuda")
-    parser.add_argument("--scale", type=float, default=1.0)
-    parser.add_argument("--workers_per_gpu", type=int, default=2, help="Number of workers per GPU (default: 2)")
-    
-    args = parser.parse_args()
-
-    # ... (文件加载逻辑同前)
-    with open(args.plan_json, 'r') as f:
-        plan_data = json.load(f)
-    cache_dir = args.cache_dir if args.cache_dir else os.path.join(args.output_dir, "cache")
-
-    executor = ExtractionExecutor(
-        plan_data=plan_data,
-        video_dir=args.video_dir,
-        output_dir=args.output_dir,
-        cache_dir=cache_dir,
-        checkpoint_dir=args.checkpoint_dir,
-        output_structure=args.structure,
-        start_frame=args.start_frame,
-        end_frame=args.end_frame,
-        device=args.device,
-        resolution_scale=args.scale,
-        workers_per_gpu=args.workers_per_gpu # 传递参数
-    )
-    
-    executor.analyze_requirements()
-    executor.populate_cache()
-    executor.execute_processing()
+    pass 
 
 if __name__ == "__main__":
     main()

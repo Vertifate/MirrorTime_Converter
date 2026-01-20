@@ -49,8 +49,7 @@ pip3 install torch torchvision torchaudio torchmetrics --index-url https://downl
 
 
 # 3. 安装项目依赖
-# 注意：此命令安装 InterpAny-Clearer 模块所需的依赖
-pip install -r ./models/Audio_Sync/InterpAny-Clearer/requirements.txt
+pip install -r requirements.txt
 ```
 
 ### 其他依赖 (COLMAP)
