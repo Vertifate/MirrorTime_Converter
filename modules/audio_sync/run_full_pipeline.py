@@ -227,13 +227,18 @@ if __name__ == "__main__":
     # --- 参数配置区 (PARAMETER CONFIGURATION) ---
     # ====================================================================
     parser = argparse.ArgumentParser(description="一键式多机位视频同步与帧提取工具")
-    
+
+    # 获取脚本所在目录的绝对路径
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    # 设置默认 checkpoint 路径为相对于脚本的路径
+    default_checkpoint_dir = os.path.join(script_dir, "InterpAny-Clearer/checkpoints/EMA-VFI/DR-EMA-VFI/train_sdi_log")
+
     parser.add_argument("video_dir", help="包含原始视频的目录")
     parser.add_argument("output_dir", help="结果输出目录")
-    parser.add_argument("--checkpoint_dir", default="./InterpAny-Clearer/checkpoints/EMA-VFI/DR-EMA-VFI/train_sdi_log", help="EMA-VFI 模型权重目录")
+    parser.add_argument("--checkpoint_dir", default=default_checkpoint_dir, help="EMA-VFI 模型权重目录")
     
-    parser.add_argument("--start_frame", type=int, default=None, help="起始帧 (可选)")
-    parser.add_argument("--end_frame", type=int, default=None, help="结束帧 (可选)")
+    parser.add_argument("--start_frame", type=int, default=10, help="起始帧 (可选)")
+    parser.add_argument("--end_frame", type=int, default=40, help="结束帧 (可选)")
     parser.add_argument("--structure", choices=['by_frame', 'by_video'], default='by_frame', help="输出目录结构")
     parser.add_argument("--workers", type=int, default=os.cpu_count(), help="并行线程数")
     parser.add_argument("--scale", type=float, default=0.5, help="输出图像的分辨率缩放比例 (例如 0.5)")
