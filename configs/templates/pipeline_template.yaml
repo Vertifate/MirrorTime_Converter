@@ -1,0 +1,183 @@
+"""
+4DGS 数据处理流程配置模板
+定义完整的数据处理管道配置
+"""
+#WDD [2026-01-19] [4DGS 流程配置模板]
+
+pipeline:
+  name: "4DGS 数据预处理完整流程"
+  version: "1.0"
+  
+  # 全局配置
+  global:
+    working_dir: "./workspace"
+    temp_dir: "./temp"
+    output_dir: "./output"
+    log_level: "INFO"
+    num_workers: 4  # 并行处理worker数量
+    
+  # 处理阶段定义
+  stages:
+    
+    # 1. 视频输入阶段
+    - name: "video-input"
+      module: "modules.video_input"
+      enabled: true
+      config:
+        supported_formats: ["mp4", "avi", "mov", "mkv"]
+        validate_codec: true
+        min_resolution: [640, 480]
+        max_resolution: [7680, 4320]  # 8K
+        min_fps: 15
+        max_fps: 120
+        min_duration_seconds: 1
+        
+    # 2. 帧提取阶段
+    - name: "frame-extraction"
+      module: "modules.frame_extraction"
+      enabled: true
+      depends_on: ["video-input"]
+      config:
+        sampling_strategy: "motion_based"  # uniform | keyframe | motion_based
+        target_frame_count: 300  # 目标提取帧数
+        sampling_fps: null  # 如果为 null，自动计算
+        quality: 95  # JPEG 质量
+        output_format: "png"  # jpg | png
+        deduplication:
+          enabled: true
+          threshold: 0.95  # 相似度阈值
+          method: "perceptual_hash"  # perceptual_hash | histogram | ssim
+        
+    # 3. 图像预处理阶段
+    - name: "image-preprocessing"
+      module: "modules.image_preprocessing"
+      enabled: true
+      depends_on: ["frame-extraction"]
+      config:
+        resize:
+          enabled: false
+          target_resolution: [1920, 1080]
+          keep_aspect_ratio: true
+        deblur:
+          enabled: false
+          method: "wiener"  # wiener | richardson_lucy
+        color_correction:
+          enabled: true
+          auto_white_balance: true
+          contrast_enhancement: "mild"  # none | mild | moderate | strong
+        sharpening:
+          enabled: false
+          strength: 0.5
+        
+    # 4. 相机参数估计阶段
+    - name: "camera-estimation"
+      module: "modules.camera_estimation"
+      enabled: true
+      depends_on: ["image-preprocessing"]
+      config:
+        backend: "colmap"  # colmap | opensfm | metashape
+        colmap:
+          feature_extractor:
+            type: "sift"  # sift | superpoint
+            max_num_features: 8192
+            first_octave: -1
+            num_octaves: 4
+          feature_matcher:
+            type: "exhaustive"  # exhaustive | sequential | vocab_tree
+            cross_check: true
+            max_ratio: 0.8
+          mapper:
+            ba_refine_focal_length: true
+            ba_refine_principal_point: true
+            ba_refine_extra_params: true
+            min_num_matches: 15
+        intrinsics:
+          estimate_from_exif: true  # 优先从 EXIF 读取
+          shared_camera: false  # 是否共享相机内参
+          
+    # 5. 位姿精化阶段
+    - name: "pose-refinement"
+      module: "modules.pose_refinement"
+      enabled: true
+      depends_on: ["camera-estimation"]
+      config:
+        bundle_adjustment:
+          enabled: true
+          max_iterations: 100
+          function_tolerance: 1e-6
+        outlier_removal:
+          enabled: true
+          reprojection_error_threshold: 4.0  # 像素
+          min_track_length: 3
+        pose_smoothing:
+          enabled: false  # 对于静态场景可关闭
+          window_size: 5
+          
+    # 6. 数据验证阶段
+    - name: "data-validation"
+      module: "modules.data_validation"
+      enabled: true
+      depends_on: ["pose-refinement"]
+      config:
+        quality_checks:
+          min_registered_images: 10
+          min_sparse_points: 1000
+          max_reprojection_error: 2.0
+          min_camera_coverage: 0.7  # 场景覆盖率
+        generate_report:
+          enabled: true
+          include_visualizations: true
+          output_format: "html"  # html | pdf | markdown
+          
+    # 7. 输出格式化阶段
+    - name: "output-formatter"
+      module: "modules.output_formatter"
+      enabled: true
+      depends_on: ["data-validation"]
+      config:
+        output_formats:
+          - type: "gaussian_splatting"
+            structure:
+              images_dir: "images"
+              sparse_dir: "sparse/0"
+              cameras_file: "cameras.txt"
+              images_file: "images.txt"
+              points3D_file: "points3D.txt"
+          - type: "nerf"
+            transforms_file: "transforms.json"
+            include_test_split: true
+            test_split_ratio: 0.1
+        metadata:
+          include_processing_info: true
+          include_quality_metrics: true
+          
+  # 流程执行配置
+  execution:
+    mode: "sequential"  # sequential | parallel (某些阶段可并行)
+    resume_on_failure: true
+    checkpoint_interval: 1  # 每个阶段后检查点
+    retry_failed_stages:
+      enabled: true
+      max_retries: 3
+      retry_delay_seconds: 5
+      
+  # 缓存配置
+  caching:
+    enabled: true
+    cache_dir: "./cache"
+    cache_intermediate_results: true
+    cache_expiry_days: 7
+    
+  # 监控和日志
+  monitoring:
+    progress_reporting:
+      enabled: true
+      update_interval_seconds: 5
+    performance_profiling:
+      enabled: true
+      output_file: "performance_profile.json"
+    resource_monitoring:
+      track_cpu: true
+      track_memory: true
+      track_gpu: true
+      warning_threshold_memory_percent: 90
