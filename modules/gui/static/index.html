@@ -247,15 +247,22 @@
     <script>
         let state = { stages: [], videos: [], current_stage: null, selected_id: 'video_to_frames' };
         let ws;
+        let hasInitialScanned = false; // #WDD [2026-01-20] 防止重复触发加载
 
         function connect() {
             ws = new WebSocket(`ws://${location.host}/ws`);
             ws.onopen = () => {
                 document.getElementById('status-dot').className = 'status-dot online';
                 document.getElementById('status-text').innerText = 'CONNECTED';
-                // 连接建立后仅尝试执行一次静默加载（读缓存）
-                const path = document.getElementById('project-dir').value;
-                if (path) startScan(false);
+
+                // #WDD [2026-01-20] 仅在页面加载后第一次连接时尝试读取缓存
+                if (!hasInitialScanned) {
+                    const path = document.getElementById('project-dir').value;
+                    if (path) {
+                        hasInitialScanned = true;
+                        startScan(false);
+                    }
+                }
             };
             ws.onmessage = (e) => {
                 const msg = JSON.parse(e.data);
@@ -276,7 +283,9 @@
             if (res.directory) {
                 document.getElementById('project-dir').value = res.directory;
                 localStorage.setItem('prjRoot', res.directory);
-                startScan(false); // 切换路径后静默加载缓存
+                // #WDD [2026-01-20] 选择新路径后允许重新触发一次加载
+                hasInitialScanned = true;
+                startScan(false);
             }
         }
 
@@ -287,6 +296,16 @@
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ project_directory: path, force: force })
+            });
+        }
+
+        async function startSync() {
+            const path = document.getElementById('project-dir').value;
+            if (!path) return alert("Please select path");
+            await fetch('/api/pipeline/sync', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ project_directory: path })
             });
         }
 
@@ -307,11 +326,21 @@
             if (!selected) return;
 
             if (state.selected_id === 'video_to_frames') {
+                const totalFrames = state.videos.reduce((n, v) => n + v.frames, 0);
+                const avgFrames = state.videos.length ? Math.round(totalFrames / state.videos.length) : 0;
+                const uniqueRes = [...new Set(state.videos.map(v => v.resolution).filter(r => r))].join(', ');
+
                 mainView.innerHTML = `
                     <div style="display:flex; justify-content:space-between; align-items:flex-end; border-bottom:1px solid var(--border-subtle); padding-bottom:1.5rem; margin-bottom:2rem">
                         <div>
                             <h1 style="font-size:1.75rem">${selected.name}</h1>
                             <p style="color:var(--accent); font-family:var(--font-mono); font-size:0.8rem; margin-top:0.5rem">${selected.message || 'Ready'}</p>
+                            ${state.videos.length > 0 ? `<div style="font-family:var(--font-mono); font-size:0.75rem; color:var(--text-secondary); margin-top:0.75rem">
+                                <span style="margin-right:1rem">Count: <strong style="color:white">${state.videos.length}</strong></span>
+                                <span style="margin-right:1rem">Total Frames: <strong style="color:white">${totalFrames}</strong></span>
+                                <span style="margin-right:1rem">Avg: <strong style="color:white">${avgFrames}</strong></span>
+                                <span>Res: <strong style="color:white">${uniqueRes}</strong></span>
+                            </div>` : ''}
                         </div>
                         <button class="btn btn-primary" onclick="startScan(true)" ${selected.status === 'running' ? 'disabled' : ''}>
                             ${selected.status === 'running' ? 'SCANNING...' : 'REFRESH VIDEOS'}
@@ -322,15 +351,46 @@
                             <div class="v-card">
                                 <img src="${v.thumbnail}" class="v-thumb">
                                 <div class="v-info">
-                                    <div class="v-name">${v.filename}</div>
+                                    <div class="v-name" title="${v.filename}">${v.filename}</div>
                                     <div class="v-meta">
                                         <span>Size: <strong>${v.size_mb}MB</strong></span>
                                         <span>Frames: <strong>${v.frames}</strong></span>
+                                        <span>Res: <strong>${v.resolution}</strong></span>
+                                        <span>Dur: <strong>${v.duration}s</strong></span>
                                     </div>
                                 </div>
                             </div>
                         `).join('')}</div>
                     ` : `<div style="text-align:center; padding-top:100px; opacity:0.3">No videos loaded. Configure PROJECT_ROOT and click Refresh.</div>`}
+                `;
+            } else if (state.selected_id === 'sync_frame_extraction') {
+                mainView.innerHTML = `
+                    <div style="display:flex; justify-content:space-between; align-items:flex-end; border-bottom:1px solid var(--border-subtle); padding-bottom:1.5rem; margin-bottom:2rem">
+                        <div>
+                            <h1 style="font-size:1.75rem">${selected.name}</h1>
+                            <p style="color:var(--accent); font-family:var(--font-mono); font-size:0.8rem; margin-top:0.5rem">${selected.message || 'Ready to sync'}</p>
+                        </div>
+                        <button class="btn btn-primary" onclick="startSync()" ${selected.status === 'running' || state.videos.length === 0 ? 'disabled' : ''}>
+                            ${selected.status === 'running' ? 'SYNCING...' : 'START SYNC EXTRACTION'}
+                        </button>
+                    </div>
+
+                    <div style="background:var(--bg-panel); border:1px solid var(--border-subtle); border-radius:12px; padding:2rem; max-width:600px">
+                        <h4 style="margin-bottom:1rem; opacity:0.7">Status Summary</h4>
+                        <div style="display:grid; grid-template-columns:1fr 1fr; gap:1.5rem">
+                            <div class="v-meta"><span>Input Videos:</span> <strong>${state.videos.length}</strong></div>
+                            <div class="v-meta"><span>Method:</span> <strong>Audio Alignment</strong></div>
+                            <div class="v-meta"><span>Stage:</span> <strong style="color:var(--accent)">${selected.status}</strong></div>
+                            <div class="v-meta"><span>Progress:</span> <strong>${selected.progress}%</strong></div>
+                        </div>
+                        
+                        ${selected.status === 'completed' ? `
+                            <div style="margin-top:2rem; padding-top:1.5rem; border-top:1px dashed var(--border-subtle)">
+                                <div style="color:var(--success); font-size:0.8rem; margin-bottom:0.5rem">✓ Extraction plan generated and saved.</div>
+                                <div style="font-size:0.75rem; color:var(--text-secondary)">Data: mirrortime_results/extraction_plan.json</div>
+                            </div>
+                        ` : ''}
+                    </div>
                 `;
             } else {
                 mainView.innerHTML = `<div style="text-align:center; padding-top:100px; opacity:0.3"><h3>${selected.name}</h3><p>Visualization coming soon.</p></div>`;
