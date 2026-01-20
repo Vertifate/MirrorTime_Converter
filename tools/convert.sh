@@ -43,14 +43,7 @@ find "$INPUT_ROOT" -mindepth 1 -maxdepth 1 -type d -name "frame*" | sort | while
     IMAGE_PATH="$FRAME_DIR"
     DATABASE_PATH="$FRAME_DIR/database.db"
     
-    # 中间结果路径 (Distorted Sparse) - 放在临时目录，不污染最终 Output
-    CACHE_DISTORTED_DIR="$ROOT_DIR/tem_params/$FRAME_NAME"
-    mkdir -p "$CACHE_DISTORTED_DIR"
-    
-    # 修正: 将 database.db 放在中间目录，而不是 Input 目录，避免 COLMAP 将其误作图片读取
-    DATABASE_PATH="$CACHE_DISTORTED_DIR/database.db"
-    
-    DISTORTED_SPARSE="$CACHE_DISTORTED_DIR/sparse"
+
     
     # 最终输出路径 (Undistorted) - 用户的 output 目录
     FINAL_OUTPUT_DIR="$OUTPUT_ROOT/$FRAME_NAME"
@@ -65,6 +58,12 @@ find "$INPUT_ROOT" -mindepth 1 -maxdepth 1 -type d -name "frame*" | sort | while
     INPUT_MODEL_PATH=""
 
     if [ "$MOD_VAL" -eq 0 ]; then
+        # 中间结果路径 (Distorted Sparse) - 仅关键帧需要
+        CACHE_DISTORTED_DIR="$ROOT_DIR/tem_params/$FRAME_NAME"
+        mkdir -p "$CACHE_DISTORTED_DIR"
+        
+        # database.db 路径
+        DATABASE_PATH="$CACHE_DISTORTED_DIR/database.db"
         # === 关键帧逻辑 ===
         echo ">> [Keyframe $FRAME_IDX] Handling..."
         
@@ -93,8 +92,12 @@ find "$INPUT_ROOT" -mindepth 1 -maxdepth 1 -type d -name "frame*" | sort | while
                 --database_path "$DATABASE_PATH" > /dev/null
 
             # Step 3: Mapper
-            echo "   -> Glomap Mapper..."
-            glomap mapper \
+            # 使用脚本所在目录下的 glomap
+            SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+            GLOMAP_BIN="$SCRIPT_DIR/glomap"
+            
+            echo "   -> Glomap Mapper (using $GLOMAP_BIN)..."
+            "$GLOMAP_BIN" mapper \
                 --database_path "$DATABASE_PATH" \
                 --image_path    "$IMAGE_PATH" \
                 --output_path   "$KEYFRAME_DISTORTED_DIR" > /dev/null
