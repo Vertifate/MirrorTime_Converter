@@ -4,22 +4,19 @@ import shutil
 import sys
 import time
 import json
+import torch.multiprocessing as mp
 
 # 确保可以导入同一目录下的模块
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from tqdm import tqdm
 from audio_sync import AudioSyncSystem
 from snap_frames import FrameSnapper
-from plan_extraction import ExtractionPlanner
-from execute_extraction_plan import ExtractionExecutor
-import torch.multiprocessing as mp
+from execute_extraction_plan import SimpleExtractor
 
 class FullSyncPipeline:
     def __init__(self, 
                  video_dir, 
                  output_dir, 
-                 checkpoint_dir,
                  chirp_duration=0.3,
                  start_freq=2000,
                  end_freq=6000,
@@ -28,17 +25,14 @@ class FullSyncPipeline:
                  start_frame=None,
                  end_frame=None,
                  output_structure='by_frame',
-                 device='cuda',
-                 workers=os.cpu_count(),
+                 workers=4,
                  resolution_scale=1.0,
-                 workers_per_gpu=1,
-                 cpu_threads=1):
+                 batch_size=10):
         """
         初始化全流程同步管线。
         """
         self.video_dir = video_dir
         self.output_dir = output_dir
-        self.checkpoint_dir = checkpoint_dir
         
         # 音频同步参数
         self.chirp_duration = chirp_duration
@@ -51,215 +45,213 @@ class FullSyncPipeline:
         self.start_frame = start_frame
         self.end_frame = end_frame
         self.output_structure = output_structure
-        self.device = device
         self.workers = workers
         self.resolution_scale = resolution_scale
-        self.workers_per_gpu = workers_per_gpu
-        self.cpu_threads = cpu_threads
+        self.batch_size = batch_size
 
         # 内部路径
         self.cache_dir = os.path.join(self.output_dir, "cache")
+        self.snap_cache_path = os.path.join(self.video_dir, "snapped_frames_cache.json")
 
+    def log(self, message, header=False):
+        """统一的日志输出格式"""
+        if header:
+            print("\n" + "="*40)
+            print(f" {message}")
+            print("="*40)
+        else:
+            print(f"[Run] {message}")
 
-    def run(self):
-        print("\n" + "="*40)
-        print(" 启动全流程视频同步与帧提取管线")
-        print("="*40)
-
-        # 0. 准备工作
-        os.makedirs(self.output_dir, exist_ok=True)
-        
-        # 扫描视频文件
+    def _scan_videos(self):
+        """扫描视频文件"""
         video_files = []
         for root, dirs, files in os.walk(self.video_dir):
             for f in files:
                 if f.lower().endswith(('.mov', '.mp4', '.avi', '.m4v')):
                     video_files.append(os.path.join(root, f))
-        
-        if not video_files:
-            print(f"错误: 在 {self.video_dir} 中未找到视频文件。")
-            return
-        
-        # 检查是否存在缓存的提取计划
-        plan_cache_path = os.path.join(self.video_dir, "extraction_plan_cache.json")
-        extraction_plan = None
-        
-        if os.path.exists(plan_cache_path):
-            print(f"\n[提示] 检测到缓存的提取计划: {plan_cache_path}")
-            print("       将跳过前三步 (同步、映射、规划)，直接使用缓存计划。")
+        return sorted(video_files)
+
+    def _load_cache(self):
+        """尝试读取缓存"""
+        if os.path.exists(self.snap_cache_path):
             try:
-                with open(plan_cache_path, 'r') as f:
-                    extraction_plan = json.load(f)
+                with open(self.snap_cache_path, 'r') as f:
+                    data = json.load(f)
+                self.log(f"已加载提取计划: {self.snap_cache_path}")
+                return data
             except Exception as e:
-                print(f"[警告] 读取缓存计划失败: {e}。将重新执行完整流程。")
-                extraction_plan = None
+                self.log(f"读取计划失败: {e}，将重新运行。", header=True)
+        return None
 
-        if extraction_plan is None:
-            start_time = time.time()
-            
-            # 1. 音频同步 (Audio Sync)
-            print("\n" + "-"*30)
-            print(" [步骤 1/4] 音频同步分析")
-            print("-"*30)
-            
-            syncer = AudioSyncSystem(
-                chirp_duration=self.chirp_duration,
-                start_freq=self.start_freq,
-                end_freq=self.end_freq,
-                sample_rate=self.sample_rate
-            )
-            
-            # 注意：align_videos 需要视频文件列表
-            alignment_data = syncer.align_videos(video_files, matching_window_seconds=self.matching_window, visualize=False, tqdm_desc="[同步] 分析视频音频")
-            
-            if not alignment_data:
-                print("错误: 音频同步失败，无法继续。")
-                return
+    def _save_cache(self, data):
+        """保存全局缓存"""
+        try:
+            with open(self.snap_cache_path, 'w') as f:
+                json.dump(data, f, indent=4)
+            print(f"[Plan] 计划已更新至: {self.snap_cache_path}")
+        except Exception as e:
+            print(f"[Plan] 保存失败: {e}")
 
-            # 2. 真实帧映射 (Frame Snapping)
-            print("\n" + "-"*30)
-            print(" [步骤 2/4] 映射真实帧时间")
-            print("-"*30)
-            
-            snapper = FrameSnapper(alignment_data, max_workers=self.workers)
-            snapped_data = snapper.snap_all_videos()
-            
-            if not snapped_data:
-                print("错误: 帧映射失败，无法继续。")
-                return
-
-            # 3. 制定提取计划 (Plan Extraction)
-            print("\n" + "-"*30)
-            print(" [步骤 3/4] 制定提取与插帧计划")
-            print("-"*30)
-            
-            planner = ExtractionPlanner(snapped_data, max_workers=self.workers)
-            extraction_plan = planner.plan()
-            
-            if not extraction_plan:
-                print("错误: 计划制定失败，无法继续。")
-                return
-            
-            end_time = time.time()
-            elapsed_time = end_time - start_time
-            print(f"\n[计时] 前三步总计用时: {elapsed_time:.2f} 秒")
-            
-            # 保存计划到缓存
-            try:
-                with open(plan_cache_path, 'w') as f:
-                    json.dump(extraction_plan, f, indent=4)
-                print(f"[缓存] 提取计划已保存至: {plan_cache_path}")
-            except Exception as e:
-                print(f"[警告] 无法保存缓存计划: {e}")
-
-        # 4. 执行提取与插帧 (Execute Plan)
+    def _run_global_alignment(self, video_files):
+        """步骤 1: 全局音频同步"""
         print("\n" + "-"*30)
-        print(" [步骤 4/4] 执行提取与 AI 插帧")
+        print(" [步骤 1] 音频同步分析 (全局)")
         print("-"*30)
         
-        step4_start_time = time.time()
-
-        executor = ExtractionExecutor(
-            plan_data=extraction_plan,
-            video_dir=self.video_dir,
-            output_dir=self.output_dir,
-            cache_dir=self.cache_dir,
-            checkpoint_dir=self.checkpoint_dir,
-            output_structure=self.output_structure,
-            start_frame=self.start_frame,
-            end_frame=self.end_frame,
-            device=self.device,
-            resolution_scale=self.resolution_scale,
-            workers_per_gpu=self.workers_per_gpu,
-            cpu_threads=self.cpu_threads
+        syncer = AudioSyncSystem(
+            chirp_duration=self.chirp_duration,
+            start_freq=self.start_freq,
+            end_freq=self.end_freq,
+            sample_rate=self.sample_rate
         )
         
-        executor.analyze_requirements()
-        executor.populate_cache()
-        executor.execute_processing()
-        
-        step4_end_time = time.time()
-        elapsed_step4 = step4_end_time - step4_start_time
-        print(f"\n[计时] 第四步总计用时: {elapsed_step4:.2f} 秒")
-        
-        # --- 新增：统计并输出插帧比例 ---
-        if executor.filtered_plan:
-            total_actions = 0
-            extract_count = 0
-            interp_count = 0
-            
-            plan_to_analyze = executor.filtered_plan
-            
-            for frame_data in plan_to_analyze.values():
-                for vid_data in frame_data['videos'].values():
-                    total_actions += 1
-                    if vid_data.get('action') == 'extract':
-                        extract_count += 1
-                    elif vid_data.get('action') == 'interpolate':
-                        interp_count += 1
-            
-            if total_actions > 0:
-                print("\n" + "="*20 + " 任务摘要 " + "="*20)
-                print(f"处理的总帧数: {len(plan_to_analyze)}")
-                print(f"  - 直接抽帧 (Extract): {extract_count} ({extract_count/total_actions*100:.1f}%)")
-                print(f"  - AI 插帧 (Interpolate): {interp_count} ({interp_count/total_actions*100:.1f}%)")
+        return syncer.align_videos(video_files, matching_window_seconds=self.matching_window, visualize=False, tqdm_desc="[同步] 分析视频音频")
 
-        # 可选：清理缓存
-        # if os.path.exists(self.cache_dir):
-        #     shutil.rmtree(self.cache_dir)
+    def _snap_batch(self, alignment_batch):
+        """步骤 2: 批次帧映射"""
+        snapper = FrameSnapper(
+            alignment_batch, 
+            max_workers=self.workers, 
+            start_frame=self.start_frame, 
+            end_frame=self.end_frame
+        )
+        return snapper.snap_all_videos()
+
+    def generate_extraction_plan(self, video_files):
+        """
+        阶段 1: 快速制定抽帧计划 (Generate Extraction Plan)
+        包括：音频同步 -> 批量扫描元数据并映射帧 -> 生成完整的 snapped_cache
+        """
+        self.log("阶段 1: 制定抽帧计划", header=True)
         
-        print("\n" + "="*40)
-        print(f" 全流程完成！结果已保存至: {self.output_dir}")
-        print("="*40)
+        # 1. 全局音频同步
+        alignment_results = self._run_global_alignment(video_files)
+        if not alignment_results:
+            self.log("音频同步失败，流程终止。", header=True)
+            return None
+            
+        # 2. 批量映射 (Snapping)
+        # 即使只做 plan，我们也可以分批 snap 避免内存压力，但主要是为了快速完成
+        total_items = len(alignment_results)
+        num_batches = (total_items + self.batch_size - 1) // self.batch_size
+        
+        global_snapped_data = {}
+        
+        print("\n" + "-"*30)
+        print(" [步骤 2] 快速映射真实帧 (制定计划)")
+        print("-"*30)
+
+        for i in range(num_batches):
+            start_idx = i * self.batch_size
+            end_idx = min((i + 1) * self.batch_size, total_items)
+            current_batch = alignment_results[start_idx:end_idx]
+            
+            print(f" >> [Plan Batch {i+1}/{num_batches}] 扫描视频 {start_idx+1}-{end_idx}...")
+            
+            batch_snapped = self._snap_batch(current_batch)
+            if batch_snapped:
+                global_snapped_data.update(batch_snapped)
+                
+                # 每批次保存一次，防止长时间运行丢失
+                self._save_cache(global_snapped_data)
+        
+        self.log(f"计划制定完成！共包含 {len(global_snapped_data)} 个视频的提取任务。")
+        return global_snapped_data
+
+    def run_extraction_batches(self, full_snapped_data):
+        """
+        阶段 2: 执行抽帧 (Execute Extraction)
+        读取完整的 plan，分批执行提取。
+        """
+        self.log("阶段 2: 执行抽帧任务", header=True)
+        
+        items_to_process = list(full_snapped_data.items())
+        items_to_process.sort(key=lambda x: x[0])
+        
+        total_items = len(items_to_process)
+        num_batches = (total_items + self.batch_size - 1) // self.batch_size
+        
+        for i in range(num_batches):
+            start_idx = i * self.batch_size
+            end_idx = min((i + 1) * self.batch_size, total_items)
+            
+            # current_batch 是 [(key, val), ...] 形式
+            current_batch_list = items_to_process[start_idx:end_idx]
+            # 转回 dict 供 extractor 使用
+            current_batch_dict = dict(current_batch_list)
+            
+            print("\n" + "-"*30)
+            print(f" [提取批次 {i+1}/{num_batches}] 处理视频 {start_idx+1}-{end_idx}")
+            print("-"*30)
+            
+            executor = SimpleExtractor(
+                snapped_data=current_batch_dict,
+                video_dir=self.video_dir,
+                output_dir=self.output_dir,
+                workers=self.workers,
+                start_frame=self.start_frame,
+                end_frame=self.end_frame,
+                output_structure=self.output_structure,
+                output_format='jpg'
+            )
+            executor.execute()
+
+    def run(self):
+        self.log("启动视频同步与提取管线", header=True)
+        os.makedirs(self.output_dir, exist_ok=True)
+
+        # 0. 扫描资源
+        video_files = self._scan_videos()
+        if not video_files:
+            self.log(f"错误: 在 {self.video_dir} 中未找到视频文件。", header=True)
+            return
+
+        # 1. 检查是否存在计划
+        global_snapped_data = self._load_cache()
+        
+        if global_snapped_data is None:
+            # 如果没有计划，执行阶段 1
+            global_snapped_data = self.generate_extraction_plan(video_files)
+        
+        if global_snapped_data is None:
+            self.log("无法生成提取计划，任务终止。")
+            return
+
+        # 2. 执行阶段 2
+        self.run_extraction_batches(global_snapped_data)
+
+        # 完成
+        self.log(f"全流程完成！结果已保存至: {self.output_dir}", header=True)
 
 if __name__ == "__main__":
-
-    # ====================================================================
-    # --- 关键修正：强制设置多进程启动方式为 spawn ---
-    # ====================================================================
     try:
-        # 必须在所有其他多进程代码执行前设置
         mp.set_start_method('spawn', force=True)
     except RuntimeError:
         pass
 
-    # ====================================================================
-    # --- 参数配置区 (PARAMETER CONFIGURATION) ---
-    # ====================================================================
     parser = argparse.ArgumentParser(description="一键式多机位视频同步与帧提取工具")
-
-    # 获取脚本所在目录的绝对路径
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    # 设置默认 checkpoint 路径为相对于脚本的路径
-    default_checkpoint_dir = os.path.join(script_dir, "InterpAny-Clearer/checkpoints/EMA-VFI/DR-EMA-VFI/train_sdi_log")
-
+    
     parser.add_argument("video_dir", help="包含原始视频的目录")
     parser.add_argument("output_dir", help="结果输出目录")
-    parser.add_argument("--checkpoint_dir", default=default_checkpoint_dir, help="EMA-VFI 模型权重目录")
     
-    parser.add_argument("--start_frame", type=int, default=10, help="起始帧 (可选)")
-    parser.add_argument("--end_frame", type=int, default=40, help="结束帧 (可选)")
+    parser.add_argument("--start_frame", type=int, default=200, help="起始帧 (可选)")
+    parser.add_argument("--end_frame", type=int, default=250, help="结束帧 (可选)")
     parser.add_argument("--structure", choices=['by_frame', 'by_video'], default='by_frame', help="输出目录结构")
-    parser.add_argument("--workers", type=int, default=os.cpu_count(), help="并行线程数")
-    parser.add_argument("--scale", type=float, default=0.5, help="输出图像的分辨率缩放比例 (例如 0.5)")
+    parser.add_argument("--workers", type=int, default=4, help="并行线程数 (建议设置为 CPU 核心数的 1/4 或更少，避免死机)")
     parser.add_argument("--window", type=float, default=1.0, help="同步匹配窗口大小(秒)")
-    parser.add_argument("--workers_per_gpu", type=int, default=3, help="AI 插帧阶段每个 GPU 承载的并行进程数 (默认: 2)")
-    parser.add_argument("--cpu_threads", type=int, default=1, help="每个推理子进程允许使用的 CPU 线程数 (建议: 1)") # <--- [新增命令行参数]
+    parser.add_argument("--batch_size", type=int, default=20, help="批处理大小 (每次处理多少个视频)")
 
     args = parser.parse_args()
 
     pipeline = FullSyncPipeline(
         video_dir=args.video_dir,
         output_dir=args.output_dir,
-        checkpoint_dir=args.checkpoint_dir,
         start_frame=args.start_frame,
         end_frame=args.end_frame,
         matching_window=args.window,
         output_structure=args.structure,
         workers=args.workers,
-        resolution_scale=args.scale,
-        workers_per_gpu=args.workers_per_gpu,
-        cpu_threads=args.cpu_threads
+        batch_size=args.batch_size
     )
     
     pipeline.run()
