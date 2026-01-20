@@ -35,11 +35,11 @@ class ConnectionManager:
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
         self.active_connections.append(websocket)
-        print(f"✅ 客户端已连接，当前连接数: {len(self.active_connections)}")
+        print(f"Client connected. Active connections: {len(self.active_connections)}")
 
     def disconnect(self, websocket: WebSocket):
         self.active_connections.remove(websocket)
-        print(f"❌ 客户端已断开，当前连接数: {len(self.active_connections)}")
+        print(f"Client disconnected. Active connections: {len(self.active_connections)}")
 
     async def broadcast(self, message: dict):
         """向所有连接的客户端广播消息"""
@@ -47,7 +47,7 @@ class ConnectionManager:
             try:
                 await connection.send_json(message)
             except Exception as e:
-                print(f"发送消息失败: {e}")
+                print(f"Send failed: {e}")
 
 manager = ConnectionManager()
 
@@ -138,10 +138,14 @@ async def get_pipeline_status():
 
 @app.post("/api/pipeline/start")
 async def start_pipeline(config: Dict[str, Any]):
-    """启动数据处理流程"""
-    print(f"🚀 启动流程，配置: {config}")
+    """Start data processing pipeline"""
+    # #WDD [2026-01-19] [Accept project directory parameter]
+    project_dir = config.get("project_directory", "")
+    print(f"Starting pipeline")
+    print(f"  Project Directory: {project_dir}")
+    print(f"  Config: {config}")
     
-    # 重置所有阶段状态
+    # Reset all stage statuses
     for stage in pipeline_state["stages"]:
         stage["status"] = "pending"
         stage["progress"] = 0
@@ -151,21 +155,21 @@ async def start_pipeline(config: Dict[str, Any]):
     
     pipeline_state["current_stage"] = "video-input"
     
-    # 广播状态更新
+    # Broadcast status update
     await manager.broadcast({
         "type": "pipeline_started",
         "data": pipeline_state
     })
     
-    # 异步执行处理流程
+    # Execute processing pipeline asynchronously
     asyncio.create_task(run_pipeline(config))
     
-    return {"status": "started", "message": "流程已启动"}
+    return {"status": "started", "message": "Pipeline started"}
 
 @app.post("/api/pipeline/stop")
 async def stop_pipeline():
-    """停止流程"""
-    print("⏸️  停止流程")
+    """Stop pipeline"""
+    print("Stopping pipeline")
     
     await manager.broadcast({
         "type": "pipeline_stopped",
@@ -218,17 +222,17 @@ async def websocket_endpoint(websocket: WebSocket):
     except WebSocketDisconnect:
         manager.disconnect(websocket)
     except Exception as e:
-        print(f"WebSocket 错误: {e}")
+        print(f"WebSocket error: {e}")
         manager.disconnect(websocket)
 
 # ============ 处理流程模拟 ============
 
 async def run_pipeline(config: Dict[str, Any]):
     """
-    执行数据处理流程
-    这里是模拟实现，实际应该调用真实的处理模块
+    Execute data processing pipeline
+    This is a simulation - should call real processing modules in production
     """
-    print("📊 开始执行流程...")
+    print("Executing pipeline...")
     
     for stage in pipeline_state["stages"]:
         stage_id = stage["id"]
@@ -289,17 +293,17 @@ async def run_pipeline(config: Dict[str, Any]):
         "data": pipeline_state
     })
     
-    print("✅ 流程执行完成")
+    print("Pipeline completed")
 
 # ============ 启动服务器 ============
 
 if __name__ == "__main__":
     import uvicorn
     
-    print("🚀 启动 MirrorTime Converter 可视化服务器...")
-    print("📡 WebSocket: ws://localhost:8000/ws")
-    print("🌐 API: http://localhost:8000/api")
-    print("📖 文档: http://localhost:8000/docs")
+    print("Starting MirrorTime Converter visualization server...")
+    print("WebSocket: ws://localhost:8000/ws")
+    print("API: http://localhost:8000/api")
+    print("Docs: http://localhost:8000/docs")
     
     uvicorn.run(
         "main:app",

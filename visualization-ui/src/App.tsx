@@ -25,6 +25,22 @@ function App() {
   const [isConnected, setIsConnected] = useState(false)
   const [isProcessing, setIsProcessing] = useState(false)
   const [ws, setWs] = useState<WebSocket | null>(null)
+  const [projectDirectory, setProjectDirectory] = useState<string>('')
+
+  // #WDD [2026-01-19] [Load project directory from localStorage on mount]
+  useEffect(() => {
+    const savedDirectory = localStorage.getItem('projectDirectory')
+    if (savedDirectory) {
+      setProjectDirectory(savedDirectory)
+    }
+  }, [])
+
+  // #WDD [2026-01-19] [Save project directory to localStorage when changed]
+  const handleDirectoryChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const directory = e.target.value
+    setProjectDirectory(directory)
+    localStorage.setItem('projectDirectory', directory)
+  }
 
   // WebSocket 连接
   useEffect(() => {
@@ -74,7 +90,8 @@ function App() {
     }
   }, [])
 
-  // 启动处理流程
+  // Start pipeline with project directory
+  // #WDD [2026-01-19] [Include project directory in pipeline config]
   const startPipeline = async () => {
     try {
       const response = await fetch('http://localhost:8000/api/pipeline/start', {
@@ -84,7 +101,8 @@ function App() {
         },
         body: JSON.stringify({
           preset: 'default',
-          input: 'sample_video.mp4'
+          input: 'sample_video.mp4',
+          project_directory: projectDirectory
         }),
       })
 
@@ -112,31 +130,31 @@ function App() {
     }
   }
 
-  // 获取状态图标
-  const getStatusIcon = (status: string) => {
+  // Get status text
+  const getStatusText = (status: string, progress: number) => {
     switch (status) {
       case 'running':
-        return '⚙️'
+        return `${progress}%`
       case 'completed':
-        return '✅'
+        return 'Completed'
       case 'failed':
-        return '❌'
+        return 'Failed'
       default:
-        return '⏳'
+        return 'Pending'
     }
   }
 
-  // 获取状态颜色
+  // Get status color
   const getStatusColor = (status: string) => {
     switch (status) {
       case 'running':
-        return '#3b82f6'
+        return '#0066ff'
       case 'completed':
-        return '#10b981'
+        return '#00cc66'
       case 'failed':
-        return '#ef4444'
+        return '#ff3333'
       default:
-        return '#6b7280'
+        return '#666666'
     }
   }
 
@@ -146,44 +164,59 @@ function App() {
       <header className="header">
         <div className="header-content">
           <h1 className="title">
-            <span className="title-icon">🎬</span>
             MirrorTime Converter
           </h1>
           <div className="header-status">
             <div className={`status-dot ${isConnected ? 'connected' : 'disconnected'}`} />
             <span className="status-text">
-              {isConnected ? '已连接' : '未连接'}
+              {isConnected ? 'Connected' : 'Disconnected'}
             </span>
           </div>
         </div>
       </header>
 
-      {/* 主内容区 */}
-      <main className="main-content">
-        {/* 控制面板 */}
-        <div className="control-panel">
-          <h2 className="panel-title">流程控制</h2>
+      {/* Full-width Control Bar */}
+      <div className="control-bar">
+        <div className="control-bar-content">
+          {/* Project Directory Input */}
+          <div className="directory-selector">
+            <span className="input-prefix">PROJECT_DIR</span>
+            <input
+              type="text"
+              className="directory-input"
+              value={projectDirectory}
+              onChange={handleDirectoryChange}
+              placeholder="/path/to/project"
+              disabled={isProcessing}
+            />
+          </div>
+
+          <div className="control-separator"></div>
+
           <div className="control-buttons">
             <button
               className="btn btn-primary"
               onClick={startPipeline}
               disabled={isProcessing || !isConnected}
             >
-              {isProcessing ? '⚙️ 处理中...' : '▶️ 启动处理'}
+              {isProcessing ? 'Running...' : 'Start'}
             </button>
             <button
               className="btn btn-secondary"
               onClick={stopPipeline}
               disabled={!isProcessing}
             >
-              ⏸️ 停止
+              Stop
             </button>
           </div>
         </div>
+      </div>
 
-        {/* 处理阶段列表 */}
+      {/* Main Content */}
+      <main className="main-content">
+        {/* Stages Panel */}
         <div className="stages-panel">
-          <h2 className="panel-title">处理阶段</h2>
+          <h2 className="panel-title">Stages</h2>
           <div className="stages-list">
             {pipelineState.stages.map((stage, index) => (
               <div
@@ -194,18 +227,14 @@ function App() {
                 <div className="stage-header">
                   <div className="stage-info">
                     <span className="stage-number">{index + 1}</span>
-                    <span className="stage-icon">{getStatusIcon(stage.status)}</span>
                     <h3 className="stage-name">{stage.name}</h3>
                   </div>
                   <div className="stage-status" style={{ color: getStatusColor(stage.status) }}>
-                    {stage.status === 'running' && `${stage.progress}%`}
-                    {stage.status === 'completed' && '完成'}
-                    {stage.status === 'failed' && '失败'}
-                    {stage.status === 'pending' && '等待'}
+                    {getStatusText(stage.status, stage.progress)}
                   </div>
                 </div>
 
-                {/* 进度条 */}
+                {/* Progress Bar */}
                 {stage.status === 'running' && (
                   <div className="progress-bar">
                     <div
@@ -215,7 +244,7 @@ function App() {
                   </div>
                 )}
 
-                {/* 状态消息 */}
+                {/* Status Message */}
                 {stage.message && (
                   <div className="stage-message">{stage.message}</div>
                 )}
@@ -229,3 +258,4 @@ function App() {
 }
 
 export default App
+  ```
