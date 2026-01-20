@@ -35,13 +35,27 @@
 
 ## 🚀 快速开始
 
-### 安装依赖
+### 环境配置 (Ubuntu 22.04, Python 3.10, CUDA 11.8)
+
+推荐使用 Conda 管理环境。以下步骤在 Ubuntu 22.04, CUDA 11.8 环境下测试通过：
 
 ```bash
-# 安装 Python 依赖
-pip install -r requirements.txt
+# 1. 创建并激活 Conda 环境
+conda create -n MirrorConverter python=3.10
+conda activate MirrorConverter
 
-# 安装 COLMAP（相机参数估计）
+# 2. 安装 PyTorch (CUDA 11.8)
+pip3 install torch torchvision torchaudio torchmetrics --index-url https://download.pytorch.org/whl/cu118
+
+
+# 3. 安装项目依赖
+# 注意：此命令安装 InterpAny-Clearer 模块所需的依赖
+pip install -r ./models/Audio_Sync/InterpAny-Clearer/requirements.txt
+```
+
+### 其他依赖 (COLMAP)
+
+```bash
 # Ubuntu
 sudo apt install colmap
 # macOS
