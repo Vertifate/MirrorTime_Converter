@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MirrorTime Converter</title>
+    <!-- #WDD [2026-01-20] [前端逻辑锁定：移除自动联动，防止递归请求导致闪烁] -->
+    <style>
+        :root {
+            --bg-app: #0a0a0c;
+            --bg-panel: #16161a;
+            --bg-input: #1f1f23;
+            --border-subtle: #2d2d32;
+            --accent: #3b82f6;
+            --text-primary: #ffffff;
+            --text-secondary: #a1a1aa;
+            --success: #10b981;
+            --error: #ef4444;
+            --font-mono: 'JetBrains Mono', monospace;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background: var(--bg-app);
+            color: var(--text-primary);
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        header {
+            height: 56px;
+            border-bottom: 1px solid var(--border-subtle);
+            display: flex;
+            align-items: center;
+            padding: 0 1.5rem;
+            justify-content: space-between;
+        }
+
+        .logo {
+            font-weight: 800;
+            letter-spacing: 0.05em;
+            font-size: 1.25rem;
+        }
+
+        .logo span {
+            color: var(--accent);
+        }
+
+        .status {
+            font-family: var(--font-mono);
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--error);
+        }
+
+        .status-dot.online {
+            background: var(--success);
+            box-shadow: 0 0 10px var(--success);
+        }
+
+        .control-bar {
+            padding: 0.75rem 1.5rem;
+            border-bottom: 1px solid var(--border-subtle);
+            display: flex;
+            gap: 1rem;
+            align-items: center;
+        }
+
+        .dir-input-group {
+            flex: 1;
+            display: flex;
+            background: var(--bg-panel);
+            border: 1px solid var(--border-subtle);
+            border-radius: 6px;
+            padding: 0.5rem 0.75rem;
+            align-items: center;
+        }
+
+        .dir-input-group span {
+            font-family: var(--font-mono);
+            font-size: 0.7rem;
+            color: var(--text-secondary);
+            margin-right: 1rem;
+        }
+
+        input {
+            flex: 1;
+            background: transparent;
+            border: none;
+            color: white;
+            font-family: var(--font-mono);
+            font-size: 0.85rem;
+            outline: none;
+        }
+
+        .btn {
+            padding: 0.5rem 1.25rem;
+            border-radius: 6px;
+            border: none;
+            font-weight: 600;
+            cursor: pointer;
+            font-size: 0.8rem;
+        }
+
+        .btn-browse {
+            background: var(--bg-input);
+            color: var(--text-secondary);
+            border: 1px solid var(--border-subtle);
+        }
+
+        .btn-primary {
+            background: var(--accent);
+            color: white;
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        main {
+            flex: 1;
+            display: flex;
+            overflow: hidden;
+        }
+
+        .sidebar {
+            width: 300px;
+            border-right: 1px solid var(--border-subtle);
+            background: var(--bg-panel);
+            padding: 1.5rem 1rem;
+            overflow-y: auto;
+        }
+
+        .tab {
+            padding: 1rem;
+            border-radius: 8px;
+            border: 1px solid var(--border-subtle);
+            margin-bottom: 0.5rem;
+            cursor: pointer;
+        }
+
+        .tab.selected {
+            border-color: var(--accent);
+            background: rgba(59, 130, 246, 0.1);
+        }
+
+        .tab-name {
+            font-size: 0.85rem;
+            font-weight: 500;
+        }
+
+        .tab-status {
+            font-family: var(--font-mono);
+            font-size: 0.65rem;
+            text-transform: uppercase;
+            margin-top: 4px;
+        }
+
+        .content {
+            flex: 1;
+            padding: 2rem;
+            overflow-y: auto;
+        }
+
+        .video-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+            gap: 1.5rem;
+        }
+
+        .v-card {
+            background: var(--bg-panel);
+            border-radius: 12px;
+            border: 1px solid var(--border-subtle);
+            overflow: hidden;
+        }
+
+        .v-thumb {
+            width: 100%;
+            aspect-ratio: 16/9;
+            object-fit: cover;
+        }
+
+        .v-info {
+            padding: 1rem;
+        }
+
+        .v-name {
+            font-weight: 600;
+            font-size: 0.8rem;
+            margin-bottom: 0.5rem;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .v-meta {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            font-family: var(--font-mono);
+            font-size: 0.65rem;
+            color: var(--text-secondary);
+            gap: 4px;
+        }
+    </style>
+</head>
+
+<body>
+    <header>
+        <div class="logo">MIRROR<span>TIME</span></div>
+        <div class="status">
+            <div id="status-dot" class="status-dot"></div>
+            <span id="status-text">DISCONNECTED</span>
+        </div>
+    </header>
+    <div class="control-bar">
+        <div class="dir-input-group">
+            <span>PROJECT_ROOT</span>
+            <input type="text" id="project-dir" placeholder="/absolute/path/to/project">
+            <button class="btn btn-browse" onclick="browseDir()">BROWSE</button>
+        </div>
+    </div>
+    <main>
+        <aside class="sidebar" id="tabs-container"></aside>
+        <div class="content" id="main-content"></div>
+    </main>
+
+    <script>
+        let state = { stages: [], videos: [], current_stage: null, selected_id: 'video_to_frames' };
+        let ws;
+
+        function connect() {
+            ws = new WebSocket(`ws://${location.host}/ws`);
+            ws.onopen = () => {
+                document.getElementById('status-dot').className = 'status-dot online';
+                document.getElementById('status-text').innerText = 'CONNECTED';
+                // 连接建立后仅尝试执行一次静默加载（读缓存）
+                const path = document.getElementById('project-dir').value;
+                if (path) startScan(false);
+            };
+            ws.onmessage = (e) => {
+                const msg = JSON.parse(e.data);
+                if (msg.type === 'initial_state' || msg.type === 'status_update') {
+                    state = { ...state, ...msg.data };
+                    render();
+                }
+            };
+            ws.onclose = () => {
+                document.getElementById('status-dot').className = 'status-dot';
+                document.getElementById('status-text').innerText = 'DISCONNECTED';
+                setTimeout(connect, 3000);
+            };
+        }
+
+        async function browseDir() {
+            const res = await fetch('/api/utils/select-directory').then(r => r.json());
+            if (res.directory) {
+                document.getElementById('project-dir').value = res.directory;
+                localStorage.setItem('prjRoot', res.directory);
+                startScan(false); // 切换路径后静默加载缓存
+            }
+        }
+
+        async function startScan(force = true) {
+            const path = document.getElementById('project-dir').value;
+            if (!path) return force ? alert("Please select path") : null;
+            await fetch('/api/pipeline/scan', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ project_directory: path, force: force })
+            });
+        }
+
+        function render() {
+            const tabsContainer = document.getElementById('tabs-container');
+            tabsContainer.innerHTML = `<div style="font-size:0.65rem; color:var(--text-secondary); margin-bottom:1rem; opacity:0.5; text-transform:uppercase; letter-spacing:1px">Sequence</div>` +
+                state.stages.map(s => `
+                <div class="tab ${state.selected_id === s.id ? 'selected' : ''}" onclick="selectTab('${s.id}')">
+                    <div class="tab-name">${s.name}</div>
+                    <div class="tab-status" style="color:${getStatusColor(s.status)}">
+                        ${s.status === 'running' ? `In Progress ${s.progress}%` : s.status}
+                    </div>
+                </div>
+            `).join('');
+
+            const mainView = document.getElementById('main-content');
+            const selected = state.stages.find(s => s.id === state.selected_id);
+            if (!selected) return;
+
+            if (state.selected_id === 'video_to_frames') {
+                mainView.innerHTML = `
+                    <div style="display:flex; justify-content:space-between; align-items:flex-end; border-bottom:1px solid var(--border-subtle); padding-bottom:1.5rem; margin-bottom:2rem">
+                        <div>
+                            <h1 style="font-size:1.75rem">${selected.name}</h1>
+                            <p style="color:var(--accent); font-family:var(--font-mono); font-size:0.8rem; margin-top:0.5rem">${selected.message || 'Ready'}</p>
+                        </div>
+                        <button class="btn btn-primary" onclick="startScan(true)" ${selected.status === 'running' ? 'disabled' : ''}>
+                            ${selected.status === 'running' ? 'SCANNING...' : 'REFRESH VIDEOS'}
+                        </button>
+                    </div>
+                    ${state.videos.length > 0 ? `
+                        <div class="video-grid">${state.videos.map(v => `
+                            <div class="v-card">
+                                <img src="${v.thumbnail}" class="v-thumb">
+                                <div class="v-info">
+                                    <div class="v-name">${v.filename}</div>
+                                    <div class="v-meta">
+                                        <span>Size: <strong>${v.size_mb}MB</strong></span>
+                                        <span>Frames: <strong>${v.frames}</strong></span>
+                                    </div>
+                                </div>
+                            </div>
+                        `).join('')}</div>
+                    ` : `<div style="text-align:center; padding-top:100px; opacity:0.3">No videos loaded. Configure PROJECT_ROOT and click Refresh.</div>`}
+                `;
+            } else {
+                mainView.innerHTML = `<div style="text-align:center; padding-top:100px; opacity:0.3"><h3>${selected.name}</h3><p>Visualization coming soon.</p></div>`;
+            }
+        }
+
+        function selectTab(id) { state.selected_id = id; render(); }
+        function getStatusColor(s) {
+            if (s === 'running') return 'var(--accent)';
+            if (s === 'completed') return 'var(--success)';
+            return 'var(--text-secondary)';
+        }
+
+        document.getElementById('project-dir').value = localStorage.getItem('prjRoot') || '';
+        connect();
+    </script>
+</body>
+
+</html>

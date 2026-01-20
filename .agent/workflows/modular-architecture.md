@@ -44,9 +44,9 @@ description: 模块化架构设计指南 - 专为 4DGS 数据预处理管道定�
 针对您的 4DGS 预处理项目，推荐以下目录结构：
 
 ```
-4dgs-data-preprocessor/
+4dgs_data_preprocessor/
 ├── modules/                           # 处理阶段模块
-│   ├── video-input/                  # 视频输入模块
+│   ├── video_input/                  # 视频输入模块
 │   │   ├── src/
 │   │   │   ├── core/
 │   │   │   │   ├── VideoReader.py    # 视频读取器
@@ -60,7 +60,7 @@ description: 模块化架构设计指南 - 专为 4DGS 数据预处理管道定�
 │   │   │   └── video_config.yaml     # 支持的视频格式配置
 │   │   └── README.md
 │   │
-│   ├── frame-extraction/              # 帧提取模块
+│   ├── frame_extraction/              # 帧提取模块
 │   │   ├── src/
 │   │   │   ├── core/
 │   │   │   │   ├── FrameExtractor.py  # 帧提取器
@@ -74,7 +74,7 @@ description: 模块化架构设计指南 - 专为 4DGS 数据预处理管道定�
 │   │   ├── tests/
 │   │   └── README.md
 │   │
-│   ├── image-preprocessing/           # 图像预处理模块
+│   ├── image_preprocessing/           # 图像预处理模块
 │   │   ├── src/
 │   │   │   ├── core/
 │   │   │   │   ├── ImageEnhancer.py   # 图像增强
@@ -84,7 +84,7 @@ description: 模块化架构设计指南 - 专为 4DGS 数据预处理管道定�
 │   │   │   └── index.py
 │   │   └── README.md
 │   │
-│   ├── camera-estimation/             # 相机参数估计模块
+│   ├── camera_estimation/             # 相机参数估计模块
 │   │   ├── src/
 │   │   │   ├── core/
 │   │   │   │   ├── ColmapWrapper.py   # COLMAP 封装
@@ -97,7 +97,7 @@ description: 模块化架构设计指南 - 专为 4DGS 数据预处理管道定�
 │   │   │   └── index.py
 │   │   └── README.md
 │   │
-│   ├── pose-refinement/               # 位姿精化模块
+│   ├── pose_refinement/               # 位姿精化模块
 │   │   ├── src/
 │   │   │   ├── core/
 │   │   │   │   ├── PoseOptimizer.py   # 位姿优化器
@@ -106,7 +106,7 @@ description: 模块化架构设计指南 - 专为 4DGS 数据预处理管道定�
 │   │   │   └── index.py
 │   │   └── README.md
 │   │
-│   ├── data-validation/               # 数据验证模块
+│   ├── data_validation/               # 数据验证模块
 │   │   ├── src/
 │   │   │   ├── core/
 │   │   │   │   ├── QualityChecker.py  # 质量检查
@@ -115,7 +115,7 @@ description: 模块化架构设计指南 - 专为 4DGS 数据预处理管道定�
 │   │   │   └── index.py
 │   │   └── README.md
 │   │
-│   ├── output-formatter/              # 输出格式化模块
+│   ├── output_formatter/              # 输出格式化模块
 │   │   ├── src/
 │   │   │   ├── core/
 │   │   │   │   ├── DataOrganizer.py   # 数据组织器
@@ -128,7 +128,7 @@ description: 模块化架构设计指南 - 专为 4DGS 数据预处理管道定�
 │   │   │   └── index.py
 │   │   └── README.md
 │   │
-│   ├── pipeline-orchestrator/         # 流程编排模块
+│   ├── pipeline_orchestrator/         # 流程编排模块
 │   │   ├── src/
 │   │   │   ├── core/
 │   │   │   │   ├── Pipeline.py        # 主流程
@@ -177,8 +177,8 @@ description: 模块化架构设计指南 - 专为 4DGS 数据预处理管道定�
 │   └── interactive.py                # 交互式界面
 │
 ├── scripts/                           # 工具脚本
-│   ├── generate-module.py            # 模块生成器
-│   ├── batch-process.py              # 批处理脚本
+│   ├── generate_module.py            # 模块生成器
+│   ├── batch_process.py              # 批处理脚本
 │   └── benchmark.py                  # 性能测试
 │
 ├── configs/                           # 配置文件目录
@@ -221,22 +221,22 @@ description: 模块化架构设计指南 - 专为 4DGS 数据预处理管道定�
 
 | 类型 | 规范 | 示例 | 使用场景 |
 |------|------|------|----------|
-| 模块目录 | `kebab-case` | `user-management`, `payment-gateway` | 所有模块目录 |
-| 源文件 | `kebab-case` | `user-service.ts`, `auth-middleware.py` | 一般源代码文件 |
+| 模块目录 | `snake_case` | `user_management`, `payment_gateway` | 所有模块目录 |
+| 源文件 | `snake_case` | `user_service.ts`, `auth_middleware.py` | 一般源代码文件 |
 | 类文件 | `PascalCase` | `UserModel.ts`, `PaymentProcessor.py` | 包含单个类的文件 |
-| 测试文件 | `*.test.*` 或 `*.spec.*` | `user-service.test.ts`, `auth.spec.py` | 测试文件 |
-| 配置文件 | `kebab-case.ext` | `database-config.json`, `app-settings.yaml` | 配置文件 |
-| 脚本文件 | `kebab-case` | `generate-module.py`, `run-tests.sh` | 可执行脚本 |
+| 测试文件 | `*_test.*` 或 `test_*.*` | `user_service_test.ts`, `test_auth.py` | 测试文件 |
+| 配置文件 | `snake_case.ext` | `database_config.json`, `app_settings.yaml` | 配置文件 |
+| 脚本文件 | `snake_case` | `generate_module.py`, `run_tests.sh` | 可执行脚本 |
 
 #### 代码命名
 
 | 类型 | 规范 | 示例 | 说明 |
 |------|------|------|------|
 | 类名 | `PascalCase` | `UserService`, `PaymentGateway` | 所有类和接口 |
-| 函数/方法 | `camelCase` | `getUserById()`, `processPayment()` | 函数和方法名 |
-| 变量 | `camelCase` | `userName`, `totalAmount` | 局部变量和参数 |
+| 函数/方法 | `snake_case` | `get_user_by_id()`, `process_payment()` | 函数和方法名 (Python/General) |
+| 变量 | `snake_case` | `user_name`, `total_amount` | 局部变量和参数 |
 | 常量 | `UPPER_SNAKE_CASE` | `MAX_RETRY_COUNT`, `API_BASE_URL` | 全局常量 |
-| 私有成员 | `_camelCase` | `_internalCache`, `_processData()` | 私有属性和方法 |
+| 私有成员 | `_snake_case` | `_internal_cache`, `_process_data()` | 私有属性和方法 |
 | 接口 | `I` + `PascalCase` | `IUserRepository`, `IPaymentService` | 接口定义 |
 | 类型别名 | `PascalCase` + `Type` | `UserDataType`, `ConfigOptionsType` | TypeScript 类型 |
 
@@ -282,7 +282,7 @@ export default UserService;
 #### 4.2 模块配置管理
 
 ```typescript
-// modules/user-management/src/config/index.ts
+// modules/user_management/src/config/index.ts
 
 export interface UserModuleConfig {
   maxUsersPerPage: number;
@@ -313,9 +313,9 @@ export function getUserModuleConfig(): UserModuleConfig {
 使用依赖注入和事件总线模式：
 
 ```typescript
-// modules/order-management/src/core/OrderService.ts
+// modules/order_management/src/core/OrderService.ts
 
-import { IPaymentService } from '../../../payment-gateway/src';
+import { IPaymentService } from '../../../payment_gateway/src';
 import { EventBus } from '../../../../core/events';
 
 export class OrderService {
@@ -362,7 +362,7 @@ export class OrderService {
 
 ## 使用示例
 \`\`\`typescript
-import { UserService } from './modules/user-management';
+import { UserService } from './modules/user_management';
 
 const userService = new UserService(config);
 const user = await userService.getUserById('123');
@@ -386,7 +386,7 @@ def create_module(module_name: str, base_path: str = "modules"):
     """
     生成新模块的基础结构
     
-    用法: python scripts/generate-module.py <module-name>
+    用法: python scripts/generate_module.py <module_name>
     """
     module_path = Path(base_path) / module_name
     
@@ -459,7 +459,7 @@ export const defaultConfig: ModuleConfig = {
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("用法: python scripts/generate-module.py <module-name>")
+        print("用法: python scripts/generate_module.py <module_name>")
         sys.exit(1)
     
     create_module(sys.argv[1])
@@ -498,12 +498,12 @@ if __name__ == "__main__":
 
 ```bash
 # 1. 使用生成脚本创建核心处理模块
-python scripts/generate-module.py video-input --lang python
-python scripts/generate-module.py frame-extraction --lang python
-python scripts/generate-module.py camera-estimation --lang python
+python scripts/generate_module.py video_input --lang python
+python scripts/generate_module.py frame_extraction --lang python
+python scripts/generate_module.py camera_estimation --lang python
 
 # 2. 创建流程编排器
-python scripts/generate-module.py pipeline-orchestrator --lang python
+python scripts/generate_module.py pipeline_orchestrator --lang python
 
 # 3. 运行数据处理
 python cli/main.py process --input video.mp4 --output ./output --preset default
@@ -514,8 +514,8 @@ python cli/main.py process --input video.mp4 --output ./output --preset default
 **阶段 1: 规划处理流程**
    ```bash
    # 使用生成脚本
-   python scripts/generate-module.py user-management
-   python scripts/generate-module.py payment-gateway
+   python scripts/generate_module.py user_management
+   python scripts/generate_module.py payment_gateway
    ```
 
 4. **实现模块**
