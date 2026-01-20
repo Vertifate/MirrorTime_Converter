@@ -110,6 +110,31 @@ class SimpleExtractor:
                     if os.path.exists(src):
                         os.makedirs(os.path.dirname(target_path), exist_ok=True)
                         shutil.move(src, target_path)
+
+                        # --- Embed Metadata (UserComment) ---
+                        try:
+                            # 1. 打开图片
+                            with Image.open(target_path) as img:
+                                # 2. 准备 metadata string (JSON)
+                                # meta 已经在上层循环中准备好了，这里直接用
+                                # 添加额外的 drift/offset 信息，如果 meta 中没有的话，
+                                # 但 meta 目前来自于 task['indices'] -> (idx, path, meta_dict)
+                                # task['indices'] 的 meta 已经在 execute() 中构建完整了
+                                
+                                meta_json = json.dumps(meta)
+                                
+                                # 3. 获取或创建 EXIF 数据
+                                exif = img.getexif()
+                                # 0x9286 = UserComment
+                                exif[0x9286] = meta_json
+                                
+                                # 4. 保存回去 (原地覆盖)
+                                # 注意: 使用 quality='keep' 或指定高质量，以免重压缩损失画质
+                                # q:v=2 ~ 95 quality roughly
+                                img.save(target_path, exif=exif, quality=95)
+                                
+                        except Exception as ex_meta:
+                            print(f"[Metadata Error] Failed to embed info for {os.path.basename(target_path)}: {ex_meta}")
                                 
             except Exception as e:
                 print(f"[FFmpeg Error] {vid_name}: {e}")
