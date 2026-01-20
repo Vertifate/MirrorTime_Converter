@@ -1,0 +1,20 @@
+# MirrorTime Converter - Python 依赖
+#WDD [2026-01-19] [项目依赖清单]
+
+# 后端依赖
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+websockets>=12.0
+python-multipart>=0.0.6
+pydantic>=2.0.0
+
+# 数据处理依赖
+opencv-python>=4.8.0
+numpy>=1.24.0
+pillow>=10.0.0
+pyyaml>=6.0
+
+# 开发依赖
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+black>=23.0.0
