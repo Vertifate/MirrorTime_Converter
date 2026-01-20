@@ -191,7 +191,8 @@ class FullSyncPipeline:
                 workers=self.workers,
                 start_frame=self.start_frame,
                 end_frame=self.end_frame,
-                output_structure=self.output_structure
+                output_structure=self.output_structure,
+                output_format='jpg'
             )
             executor.execute()
 
@@ -233,8 +234,8 @@ if __name__ == "__main__":
     parser.add_argument("video_dir", help="包含原始视频的目录")
     parser.add_argument("output_dir", help="结果输出目录")
     
-    parser.add_argument("--start_frame", type=int, default=10, help="起始帧 (可选)")
-    parser.add_argument("--end_frame", type=int, default=40, help="结束帧 (可选)")
+    parser.add_argument("--start_frame", type=int, default=200, help="起始帧 (可选)")
+    parser.add_argument("--end_frame", type=int, default=250, help="结束帧 (可选)")
     parser.add_argument("--structure", choices=['by_frame', 'by_video'], default='by_frame', help="输出目录结构")
     parser.add_argument("--workers", type=int, default=4, help="并行线程数 (建议设置为 CPU 核心数的 1/4 或更少，避免死机)")
     parser.add_argument("--window", type=float, default=1.0, help="同步匹配窗口大小(秒)")

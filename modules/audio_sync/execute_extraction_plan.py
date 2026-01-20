@@ -33,7 +33,7 @@ def _get_raw_timestamps(video_path):
 
 class SimpleExtractor:
     def __init__(self, snapped_data, video_dir, output_dir, workers=os.cpu_count(), 
-                 start_frame=None, end_frame=None, output_structure='by_frame'):
+                 start_frame=None, end_frame=None, output_structure='by_frame', output_format='jpg'):
         """
         简化版提取器：直接根据 snapped_data 提取帧。
         """
@@ -44,6 +44,7 @@ class SimpleExtractor:
         self.start_frame = start_frame
         self.end_frame = end_frame
         self.output_structure = output_structure
+        self.output_format = output_format.lower()
         
         # 缓存每个视频的完整时间戳，用于将时间转换为索引
         self.video_full_timestamps = {}
@@ -84,40 +85,31 @@ class SimpleExtractor:
             # 使用 temp pattern 输出
             temp_dir = os.path.join(self.output_dir, "temp_extract", vid_name)
             os.makedirs(temp_dir, exist_ok=True)
-            temp_pattern = os.path.join(temp_dir, f"chunk_{i}_%04d.png")
+            
+            ext = f".{self.output_format}"
+            temp_pattern = os.path.join(temp_dir, f"chunk_{i}_%04d{ext}")
             
             try:
                 # 运行 FFmpeg
+                # For JPG, we might want to set quality using qscale:v or q:v. Defaulting to high quality.
+                ffmpeg_args = {'vsync': 0, 'start_number': 0}
+                if self.output_format in ['jpg', 'jpeg']:
+                     ffmpeg_args['q:v'] = 2 # High quality for JPG
+                
                 (ffmpeg.input(full_path)
                  .filter('select', select_expr)
-                 .output(temp_pattern, vsync=0, start_number=0)
+                 .output(temp_pattern, **ffmpeg_args)
                  .overwrite_output()
                  .run(quiet=True))
                  
-                # 将临时文件重命名/移动到最终目标路径，并注入元数据
+                # 将临时文件重命名/移动到最终目标路径
+                # 注意：对于 JPG，我们暂时不注入复杂的元数据（原代码用的是 PngInfo）
+                # 如果需要元数据，建议保存为 sidecar json 或写入 EXIF (较复杂)
                 for j, (true_idx, target_path, meta) in enumerate(chunk):
                     src = temp_pattern % j
                     if os.path.exists(src):
                         os.makedirs(os.path.dirname(target_path), exist_ok=True)
-                        
-                        # --- 元数据注入逻辑 ---
-                        try:
-                            with Image.open(src) as img:
-                                png_info = PngImagePlugin.PngInfo()
-                                
-                                # 写入基础元数据
-                                png_info.add_text("MirrorTime_IdealTime", f"{meta['ideal_time']:.6f}")
-                                png_info.add_text("MirrorTime_RealTime", f"{meta['real_time']:.6f}")
-                                png_info.add_text("MirrorTime_Timestamp", f"{meta['global_time']:.6f}")
-                                png_info.add_text("MirrorTime_TimeError", f"{meta['time_error']:.6f}")
-                                
-                                # 将原图（带元数据）保存到目标路径
-                                img.save(target_path, pnginfo=png_info)
-                        except Exception as e:
-                            print(f"[Metadata Error] {target_path}: {e}")
-                            # 如果元数据写入失败，至少尝试直接移动文件
-                            if not os.path.exists(target_path):
-                                shutil.move(src, target_path)
+                        shutil.move(src, target_path)
                                 
             except Exception as e:
                 print(f"[FFmpeg Error] {vid_name}: {e}")
@@ -145,10 +137,11 @@ class SimpleExtractor:
                 
                 # 计算输出路径
                 frame_key = f"frame_{i:06d}"
+                ext = f".{self.output_format}"
                 if self.output_structure == 'by_frame':
-                    out_path = os.path.join(self.output_dir, frame_key, f"{os.path.splitext(vid_name)[0]}.png")
+                    out_path = os.path.join(self.output_dir, frame_key, f"{os.path.splitext(vid_name)[0]}{ext}")
                 else:
-                    out_path = os.path.join(self.output_dir, os.path.splitext(vid_name)[0], f"{frame_key}.png")
+                    out_path = os.path.join(self.output_dir, os.path.splitext(vid_name)[0], f"{frame_key}{ext}")
                 
                 # 如果已存在则跳过
                 if os.path.exists(out_path): continue
