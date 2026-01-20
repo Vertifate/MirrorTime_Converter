@@ -1,0 +1,157 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: LiteGS Train (laodan frame_000196)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "./example_train.py",
+            "args": [
+                "--sh_degree",
+                "3",
+                "-s",
+                "/home/crgj/wdd/data/new/laodan/frame_000196",
+                "-i",
+                "images",
+                "-m",
+                "/home/crgj/wdd/output/laodan/frame_000196",
+                "--target_primitives",
+                "2000000",
+                "--iterations",
+                "20000",
+                "--resolution",
+                "1",
+                "--position_lr_max_steps",
+                "20000",
+                "--position_lr_final",
+                "0.000016",
+                "--densification_interval",
+                "2",
+                "--eval"
+            ],
+            "env": {
+                "QT_QPA_PLATFORM": "offscreen"
+            },
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false
+        },
+        {
+            "name": "Python: LiteGS Batch Train (laodan all frames)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "./scripts/batch_train_frames.py",
+            "args": [
+                "--base_dir",
+                "/home/crgj/wdd/data/new/laodan",
+                "--output_root",
+                "/home/crgj/wdd/output/laodan",
+                "--collect_dir",
+                "/home/crgj/wdd/output/laodan/ply_collect",
+                "--images_folder",
+                "images",
+                "--target_primitives",
+                "2000000",
+                "--iterations",
+                "30000",
+                "--position_lr_max_steps",
+                "20000",
+                "--position_lr_final",
+                "0.000016",
+                "--densification_interval",
+                "2",
+                "--resolution",
+                "1600",
+                "--eval"
+            ],
+            "env": {
+                "QT_QPA_PLATFORM": "offscreen"
+            },
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false
+        },
+        {
+            "name": "Python: LiteGS Cylinder Clean",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "./scripts/clean_gs_by_cylinder.py",
+            "args": [
+                "-s",
+                "/home/crgj/wdd/data/new/laodan/frame_000196",
+                "-i",
+                "images",
+                "--input_ply",
+                "/home/crgj/wdd/output/laodan/frame_000196/point_cloud/finish/point_cloud.ply",
+                "--output_ply",
+                "/home/crgj/wdd/output/laodan/frame_000196/point_cloud/finish/point_cloud_cleaned.ply",
+                "--scale",
+                "0.8",
+                "--sh_degree",
+                "3",
+                "--clean",
+                "--sor_std",
+                "2.0",
+                "--camera_radius",
+                "0.1"
+            ],
+            "env": {
+                "QT_QPA_PLATFORM": "offscreen"
+            },
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false
+        },
+        {
+            "name": "Python: LiteGS Mask Gen",
+            "type": "python",
+            "request": "launch",
+            "program": "scripts/generate_masks.py",
+            "console": "integratedTerminal",
+            "purpose": [],
+            "args": [
+                "--source_path",
+                "/home/crgj/wdd/data/new/laodan/frame_000196",
+                "--input_ply",
+                "/home/crgj/wdd/output/laodan/frame_000196/point_cloud/finish/point_cloud_cleaned.ply"
+            ],
+            "env": {
+                "QT_QPA_PLATFORM": "offscreen"
+            },
+            "cwd": "${workspaceFolder}",
+            "justMyCode": false
+        },
+        {
+            "name": "Python: LiteGS Full Pipeline Batch (laodan)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "scripts/pipeline_batch_all.py",
+            "args": [
+                "--base_dir",
+                "/media/wyk/Windows/Users/13530/Desktop/wanou_test/data",
+                "--output_root",
+                "/media/wyk/Windows/Users/13530/Desktop/wanou_test/data",
+                "--iterations",
+                "10000",
+                "--clean_scale",
+                "0.75",
+                "--camera_radius",
+                "0.1",
+                "--skip_train",
+                "--skip_clean",
+                "--extra_train_args",
+                "-r",
+                "8"
+            ],
+            "env": {
+                "QT_QPA_PLATFORM": "offscreen"
+            },
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false
+        }
+    ]
+}
