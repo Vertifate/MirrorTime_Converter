@@ -1,0 +1,3 @@
+[submodule "submodels/glomap"]
+	path = submodels/glomap
+	url = https://github.com/colmap/glomap.git
