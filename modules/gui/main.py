@@ -1,5 +1,13 @@
 import os
 import sys
+
+# #WDD [2026-01-20] [Bugfix: 修复导入路径] 添加项目根目录到 sys.path，解决 ModuleNotFoundError: No module named 'modules'
+current_dir = os.path.dirname(os.path.abspath(__file__))
+# 修正：从 modules/gui 回溯到 MirrorTime_Converter 需要向上两级 (../..)
+project_root = os.path.abspath(os.path.join(current_dir, "../.."))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
 import asyncio
 import json
 import base64
@@ -22,7 +30,7 @@ import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 
 # #WDD [2026-01-20] [架构终极锁定：移除 tk 回退，物理隔离项目数据，修复 UI 循环闪烁]
 
@@ -49,8 +57,12 @@ class State:
                 {"id": "segmentation", "name": "Dynamic Mask Segmentation", "status": "pending", "progress": 0, "message": ""},
                 {"id": "format_export", "name": "Export 4DGS Format", "status": "pending", "progress": 0, "message": ""},
             ],
-            "videos": []
+            "videos": [],
+            # #WDD [2026-01-20] [新增] 控制台日志历史
+            "logs": []
         }
+        # #WDD [2026-01-20] [新增] 停止请求标志
+        self.stop_requested = False
         self.connections: List[WebSocket] = []
 
     async def broadcast(self, msg_type: str, data: Any):
@@ -214,10 +226,30 @@ async def run_video_scan(project_dir: str, force_refresh: bool = False):
     v_stage.update({"status": "completed", "progress": 100, "message": f"Finalized {len(videos)} videos."})
     await state.broadcast("status_update", state.pipeline)
 
-async def run_sync_extraction(project_dir: str):
+from modules.audio_sync.run_full_pipeline import FullSyncPipeline
+
+class GUIStatusLogger:
+    def __init__(self, callback):
+        self.callback = callback
+    def log_status(self, msg, progress=None):
+        self.callback(msg, progress)
+
+class GUISyncPipeline(FullSyncPipeline):
+    """继承 Pipeline 并重写 log 方法以支持 WebSocket 进度推送"""
+    def __init__(self, status_callback, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.status_callback = status_callback
+        
+    def log(self, message, header=False):
+        print(f"[GUI-Backend] {message}")
+        # 尝试从消息中解析进度 (简单的启发式)
+        # 实际上准确进度需要改造 backend，这里先做简单的文本反馈
+        self.status_callback(message)
+
+async def run_sync_extraction(project_dir: str, force_restart: bool = False):
     """
-    同步拆帧逻辑实现
-    #WDD [2026-01-20] [集成同步拆帧任务]
+    同步拆帧逻辑实现 - 调用真实管线
+    #WDD [2026-01-20] [重构: 集成 FullSyncPipeline, 支持断点续传/重来]
     """
     if not project_dir or not os.path.isdir(project_dir): return
     
@@ -225,58 +257,186 @@ async def run_sync_extraction(project_dir: str):
     if not stage: return
 
     state.pipeline["current_stage"] = stage["id"]
-    stage.update({"status": "running", "progress": 0, "message": "Starting sync pipeline..."})
+    status_msg = "Starting sync pipeline..."
+    if force_restart:
+        status_msg = "Force restarting sync pipeline..."
+    
+    stage.update({"status": "running", "progress": 0, "message": status_msg})
     await state.broadcast("status_update", state.pipeline)
 
-    # 模拟调用 FullSyncPipeline 的各个步骤
+    loop = asyncio.get_running_loop()
+
+    def status_update(msg, progress=None):
+        if progress is not None:
+             stage["progress"] = progress
+        stage["message"] = msg
+        
+        # #WDD [2026-01-20] [新增] 追加到日志历史（保留最近50条）
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        log_entry = f"[{timestamp}] {msg}"
+        state.pipeline["logs"].append(log_entry)
+        if len(state.pipeline["logs"]) > 50:
+            state.pipeline["logs"] = state.pipeline["logs"][-50:]
+        
+        # #WDD [2026-01-20] [UI Feed] 修复进度不更新的问题: 使用 run_coroutine_threadsafe 跨线程推送
+        asyncio.run_coroutine_threadsafe(state.broadcast("status_update", state.pipeline), loop)
+
     try:
-        # 步骤 1: 音频同步同步
-        stage.update({"message": "Analyzing audio synchronization...", "progress": 10})
-        await state.broadcast("status_update", state.pipeline)
-        await asyncio.sleep(1.5) # 模拟计算耗时
-
-        # 步骤 2: 生成提取计划
-        stage.update({"message": "Generating frame extraction plan...", "progress": 40})
-        await state.broadcast("status_update", state.pipeline)
-        await asyncio.sleep(2) # 模拟计算耗时
+        # 构造参数
+        video_dir = project_dir # 假设根目录即视频目录，或者 videos 子目录? 
+        # gui 代码之前的 scan 逻辑会看 project_dir 和 project_dir/videos
+        # 这里为了稳妥，检查一下
+        if os.path.join(project_dir, "videos"):
+             src_video = os.path.join(project_dir, "videos") if os.path.exists(os.path.join(project_dir, "videos")) else project_dir
         
-        # 结果保存
-        cache_dir = Path(project_dir) / "mirrortime_results"
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        plan_file = cache_dir / "extraction_plan.json"
+        # #WDD [2026-01-20] [User Req] 输出到根目录 input 文件夹
+        output_dir = os.path.join(project_dir, "input")
         
-        # 模拟一份计划数据
-        mock_plan = {
-            "project": os.path.basename(project_dir),
-            "timestamp": datetime.now().isoformat(),
-            "video_count": len(state.pipeline["videos"]),
-            "sync_window": "1.0s",
-            "summary": "All videos successfully aligned via audio fingerprinting."
-        }
-        
-        with open(plan_file, 'w') as f:
-            json.dump(mock_plan, f, indent=4)
-        print(f"[*] Extraction plan saved to {plan_file}")
+        # 处理强制重开
+        cache_file = os.path.join(src_video, "snapped_frames_cache.json")
+        if force_restart and os.path.exists(cache_file):
+            try:
+                os.remove(cache_file)
+                print(f"[*] Deleted cache plan: {cache_file}")
+            except Exception as e:
+                print(f"[!] Failed to delete cache: {e}")
 
-        # 步骤 3: 图片导出进度模拟
-        for i in range(50, 101, 10):
-            stage.update({"message": f"Extracting frames: {i}%", "progress": i})
-            await state.broadcast("status_update", state.pipeline)
-            await asyncio.sleep(0.5)
+        # 在线程中运行以避免阻塞 asyncio loop
+        def _run_worker():
+            pipeline = GUISyncPipeline(
+                status_callback=status_update,
+                video_dir=src_video,
+                output_dir=output_dir,
+                output_structure='by_frame',
+                workers=max(1, (os.cpu_count() or 4) - 2), # 留点余地
+                batch_size=10,
+                # #WDD [2026-01-20] [UI Feed] 传递进度回调
+                progress_callback=status_update,
+                # #WDD [2026-01-20] [新增] 传递停止检查回调
+                stop_check=lambda: state.stop_requested
+            )
+            pipeline.run()
 
+        # 启动后台线程
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, _run_worker)
+
+        # 完成
         stage.update({
             "status": "completed", 
             "progress": 100, 
-            "message": "Sync extraction complete. Frames saved to output folder."
+            "message": "Sync extraction pipeline finished."
         })
         state.pipeline["current_stage"] = None
         await state.broadcast("status_update", state.pipeline)
 
     except Exception as e:
-        stage.update({"status": "failed", "message": f"Error: {str(e)}"})
+        error_msg = str(e)
+        if state.stop_requested:
+            # #WDD [2026-01-20] [新增] 用户主动停止
+            stage.update({"status": "stopped", "message": "Pipeline stopped by user. Progress saved."})
+        else:
+            stage.update({"status": "failed", "message": f"Error: {error_msg}"})
         state.pipeline["current_stage"] = None
+        state.stop_requested = False  # Reset flag
         await state.broadcast("status_update", state.pipeline)
-        print(f"[!] Sync Extraction failed: {e}")
+        print(f"[!] Sync Extraction stopped/failed: {e}")
+
+@app.post("/api/pipeline/stop")
+async def api_stop_pipeline():
+    """
+    #WDD [2026-01-20] [新增] 强制停止当前管线
+    设置停止标志，管线会在下一个检查点安全停止
+    """
+    state.stop_requested = True
+    stage = next((s for s in state.pipeline["stages"] if s["id"] == "sync_frame_extraction"), None)
+    if stage and stage["status"] == "running":
+        stage["message"] = "Stopping... (waiting for current task to finish)"
+        await state.broadcast("status_update", state.pipeline)
+    return {"status": "stop_requested"}
+
+@app.post("/api/pipeline/visualize")
+async def api_visualize(data: Dict[str, Any]):
+    """获取可视化数据: 时间轴和多视角结构"""
+    project_dir = data.get("project_dir")
+    if not project_dir: return {"error": "No path"}
+    
+    # 尝试找到 cache
+    # logic similar to run_sync
+    src_video = project_dir
+    possible = [project_dir, os.path.join(project_dir, "videos")]
+    cache_path = None
+    for p in possible:
+        if os.path.exists(os.path.join(p, "snapped_frames_cache.json")):
+            cache_path = os.path.join(p, "snapped_frames_cache.json")
+            break
+            
+    if not cache_path:
+        return {"error": "No synchronization plan found. Please run Sync Extraction first."}
+        
+    try:
+        with open(cache_path, 'r') as f:
+            data = json.load(f)
+            
+        # Pivot data: Group by frame index/ideal time
+        # 我们取第一个有数据的视频作为基准
+        timeline = {}
+        
+        for vid, info in data.items():
+            mapping = info.get("mapping", [])
+            path = info.get("file_path")
+            for item in mapping:
+                idx = item.get("ideal_time") # Use ideal time as key (float) approx? No, let's use list index if consistent
+                # 实际上 idx = item['frame_idx'] 是全局统一的 0, 1, 2...
+                f_idx = item.get("frame_idx")
+                
+                if f_idx not in timeline:
+                    timeline[f_idx] = {
+                        "frame_idx": f_idx,
+                        "ideal_time": item.get("ideal_time"),
+                        "views": []
+                    }
+                
+                timeline[f_idx]["views"].append({
+                    "video": vid,
+                    "path": path, # full path needs for thumb
+                    "real_time": item.get("snapped_time"),
+                    "global_time": item.get("snapped_time") * info.get("drift_scale", 1.0) + info.get("offset_seconds", 0.0)
+                })
+        
+        # Convert to sorted list
+        sorted_timeline = [timeline[k] for k in sorted(timeline.keys())]
+        return {"timeline": sorted_timeline}
+        
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/api/pipeline/frame_thumb")
+def get_frame_thumb(path: str, time: float):
+    """获取指定视频在指定时间的缩略图"""
+    if not os.path.exists(path): return FileResponse(ui_path/"assets/placeholder.png") # Fail gracefully
+    
+    try:
+        # ffmpeg -ss time -i path -vframes 1 -f image2pipe -vcodec mjpeg -
+        cmd = [
+            'ffmpeg',
+            '-ss', f"{time:.3f}",
+            '-i', path,
+            '-vframes', '1',
+            '-f', 'image2pipe',
+            '-vcodec', 'mjpeg',
+            '-vf', 'scale=320:-1', # 小图
+            '-q:v', '5',
+            '-nostdin',
+            '-loglevel', 'error',
+            '-' # Pipe output
+        ]
+        proc = subprocess.run(cmd, capture_output=True)
+        if proc.returncode == 0:
+            return Response(content=proc.stdout, media_type="image/jpeg")
+    except: pass
+    return Response(status_code=404)
 
 @app.get("/api/utils/select-directory")
 def select_dir():
@@ -295,7 +455,7 @@ async def api_scan(data: Dict[str, Any]):
 
 @app.post("/api/pipeline/sync")
 async def api_sync(data: Dict[str, Any]):
-    asyncio.create_task(run_sync_extraction(data.get("project_directory")))
+    asyncio.create_task(run_sync_extraction(data.get("project_directory"), data.get("force_restart", False)))
     return {"ok": True}
 
 @app.websocket("/ws")
@@ -315,6 +475,7 @@ if ui_path.exists():
     async def index(): return FileResponse(ui_path/"index.html")
 
 if __name__ == "__main__":
+    from fastapi import Response # Missing import supplement
     def start_browse():
         import time; time.sleep(1.5)
         webbrowser.open("http://127.0.0.1:8000")
