@@ -265,6 +265,208 @@ class SimpleExtractor:
             
         print("提取完成。")
 
+class CacheExtractor:
+    def __init__(self, video_dir, cache_dir, workers=os.cpu_count(), 
+                 start_frame=None, end_frame=None, buffer_seconds=1.0, 
+                 output_format='jpg'):
+        self.video_dir = video_dir
+        self.cache_dir = cache_dir
+        self.workers = workers
+        self.start_frame = start_frame
+        self.end_frame = end_frame
+        self.buffer_seconds = buffer_seconds
+        self.output_format = output_format.lower()
+    
+    def _extract_video(self, video_path):
+        """提取单个视频的帧（支持 buffer 范围）并写入元数据"""
+        vid_name = os.path.basename(video_path)
+        vid_stem = os.path.splitext(vid_name)[0]
+        
+        # 0. 快速缓存检查 (Heuristic Check)
+        # 尝试避免昂贵的 _get_raw_timestamps 调用
+        # 假设 FPS=60 (取一个较高值以获得最大的 Buffer 范围预测，确保不会误判)
+        # 或者我们只检查核心请求区域 (start_frame ~ end_frame) 是否存在
+        # 如果核心区域存在，且首尾延伸了一些文件，我们就认为已经 Done 了
+        
+        output_pattern_base = os.path.join(self.cache_dir, f"{vid_stem}_frame_%06d.{self.output_format}")
+        
+        # 检查核心请求范围
+        check_start = 0 if self.start_frame is None else self.start_frame
+        check_end = 0 if self.end_frame is None else self.end_frame
+        
+        # 如果 start/end 基本都在，我们认为命中
+        # 注意：这里没有检查 Buffer，因为 Buffer 是为了安全性。
+        # 如果上次运行已经生成了包含 Buffer 的文件，那么这几个核心帧一定存在。
+        
+        core_files_exist = False
+        if check_end >= check_start:
+             f_start = output_pattern_base % check_start
+             f_end = output_pattern_base % check_end
+             if os.path.exists(f_start) and os.path.exists(f_end):
+                 # print(f"[Skip] Fast cache hit for {vid_name}")
+                 return
+
+        # 1. 获取所有时间戳 (Slow IO)
+        timestamps = _get_raw_timestamps(video_path)
+        if timestamps is None or len(timestamps) == 0:
+            print(f"[Skip] No timestamps for {vid_name}")
+            return
+
+        total_frames = len(timestamps)
+        
+        # 2. 计算提取范围
+        # 估算 FPS 用于计算 buffer 帧数
+        if len(timestamps) > 1:
+            avg_duration = (timestamps[-1] - timestamps[0]) / (len(timestamps) - 1)
+            fps_est = 1.0 / avg_duration if avg_duration > 0 else 30.0
+        else:
+            fps_est = 30.0
+            
+        buffer_frames = int(fps_est * self.buffer_seconds)
+        
+        s_idx = 0
+        e_idx = total_frames - 1
+        
+        if self.start_frame is not None:
+            s_idx = max(0, self.start_frame - buffer_frames)
+        
+        if self.end_frame is not None:
+            e_idx = min(total_frames - 1, self.end_frame + buffer_frames)
+            
+        if s_idx > e_idx:
+            print(f"[Skip] Invalid range for {vid_name}: {s_idx}-{e_idx}")
+            return
+            
+        # 准备实际要提取的帧索引列表
+        # 注意：这里我们提取的是连续区间 [s_idx, e_idx]
+        count_to_extract = e_idx - s_idx + 1
+        
+        # 0. 准备输出文件名 Pattern (注意：我们会生成 frame_%06d，这里的序号对应 s_idx 开始)
+        # 稍微麻烦点：ffmpeg 批量输出时，start_number 可以设定，但文件名中的序号如果是 frame_%06d 会从 start_number 开始递增
+        # 所以如果我们设置 start_number=s_idx，那么输出文件就是 frame_{s_idx}, frame_{s_idx+1}... 正好符合我们的需求！
+        output_pattern = os.path.join(self.cache_dir, f"{vid_stem}_frame_%06d.{self.output_format}")
+        
+        # 检查区间首尾文件是否存在，简单跳过
+        first_file = output_pattern % s_idx
+        last_file = output_pattern % e_idx
+        if os.path.exists(first_file) and os.path.exists(last_file):
+            # print(f"[Skip] Cache exists for {vid_name}")
+            return
+
+        try:
+            # print(f"[Cache] Valid range for {vid_name}: {s_idx} - {e_idx} (Buffer: {buffer_frames})")
+            # 使用 select 过滤器提取特定区间
+            select_expr = f"between(n,{s_idx},{e_idx})"
+            
+            ffmpeg_args = {
+                'vsync': 0, 
+                'start_number': s_idx, 
+                'q:v': 2, # High quality for JPG
+                'loglevel': "error"
+            }
+            
+            (
+                ffmpeg
+                .input(video_path)
+                .filter('select', select_expr)
+                .output(output_pattern, **ffmpeg_args)
+                .overwrite_output()
+                .run()
+            )
+        except ffmpeg.Error as e:
+            print(f"[FFmpeg Error] {vid_name}: {e.stderr.decode() if e.stderr else str(e)}")
+            return
+
+        # 3. 注入元数据
+        cnt = 0
+        # 遍历区间内的每一帧
+        for i in range(s_idx, e_idx + 1):
+            fpath = output_pattern % i
+            if not os.path.exists(fpath):
+                continue
+            
+            try:
+                # 获取对应帧的原始时间戳
+                t = timestamps[i]
+                meta = {"MirrorTime": t}
+                meta_json = json.dumps(meta)
+                
+                with Image.open(fpath) as img:
+                    exif = img.getexif()
+                    exif[0x9286] = meta_json
+                    img.save(fpath, exif=exif, quality=95)
+                    cnt += 1
+            except Exception as e:
+                pass
+        
+        # print(f"[Done] {vid_name}: Cached {cnt} frames.")
+
+    def extract_single_frame_fallback(self, video_path, frame_idx, output_path, meta_dict):
+        """
+        兜底：提取单帧。
+        当同步后需要的帧超出了缓存范围时调用。
+        """
+        try:
+            # 1. 提取
+            select_expr = f"eq(n,{frame_idx})"
+            ffmpeg_args = {'vsync': 0, 'q:v': 2, 'loglevel': "error"}
+            
+            # 使用临时文件
+            temp_path = output_path + ".tmp.jpg"
+            
+            (
+                ffmpeg
+                .input(video_path)
+                .filter('select', select_expr)
+                .output(temp_path, **ffmpeg_args)
+                .overwrite_output()
+                .run()
+            )
+            
+            if not os.path.exists(temp_path):
+                print(f"[Fallback Fail] Could not extract frame {frame_idx} from {os.path.basename(video_path)}")
+                return False
+
+            # 2. 写入元数据
+            try:
+                meta_json = json.dumps(meta_dict)
+                with Image.open(temp_path) as img:
+                    exif = img.getexif()
+                    exif[0x9286] = meta_json
+                    img.save(output_path, exif=exif, quality=95)
+            except Exception as e:
+                 # 如果写元数据失败，至少把图片挪过去
+                 print(f"[Fallback Meta Error] {e}")
+                 shutil.move(temp_path, output_path)
+            
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+                
+            return True
+            
+        except ffmpeg.Error as e:
+            print(f"[Fallback Error] {os.path.basename(video_path)} frame {frame_idx}: {e.stderr.decode() if e.stderr else str(e)}")
+            return False
+
+    def run(self):
+        """执行批量缓存提取"""
+        os.makedirs(self.cache_dir, exist_ok=True)
+        
+        # 扫描视频
+        video_files = []
+        for root, dirs, files in os.walk(self.video_dir):
+            for f in files:
+                if f.lower().endswith(('.mov', '.mp4', '.avi', '.m4v')):
+                    video_files.append(os.path.join(root, f))
+        
+        print(f"准备缓存帧区间 [{self.start_frame}-{self.end_frame}] (+buffer {self.buffer_seconds}s) for {len(video_files)} videos")
+        
+        with ThreadPoolExecutor(max_workers=self.workers) as executor:
+            futures = [executor.submit(self._extract_video, v) for v in video_files]
+            for _ in tqdm(as_completed(futures), total=len(video_files), desc="[Cache] Pre-extracting"):
+                pass
+
+
 def main():
     pass 
 
