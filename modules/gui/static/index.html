@@ -140,10 +140,13 @@
             flex: 1;
             display: flex;
             overflow: hidden;
+            position: relative;
         }
 
         .sidebar {
             width: 300px;
+            min-width: 300px;
+            flex-shrink: 0;
             border-right: 1px solid var(--border-subtle);
             background: var(--bg-panel);
             padding: 1.5rem 1rem;
@@ -221,6 +224,24 @@
             color: var(--text-secondary);
             gap: 4px;
         }
+
+        .spinner {
+            width: 16px;
+            height: 16px;
+            border: 2px solid rgba(255, 255, 255, 0.1);
+            border-left-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            display: inline-block;
+            vertical-align: middle;
+            margin-right: 8px;
+        }
+
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
     </style>
 </head>
 
@@ -247,7 +268,11 @@
     <script>
         let state = { stages: [], videos: [], current_stage: null, selected_id: 'video_to_frames' };
         let ws;
-        let hasInitialScanned = false; // #WDD [2026-01-20] 防止重复触发加载
+        let hasInitialScanned = false;
+
+        // #WDD [2026-01-20] [新增] 计时器相关变量
+        let lastUpdateTime = Date.now();
+        let elapsedTimerInterval = null;
 
         function connect() {
             ws = new WebSocket(`ws://${location.host}/ws`);
@@ -255,7 +280,6 @@
                 document.getElementById('status-dot').className = 'status-dot online';
                 document.getElementById('status-text').innerText = 'CONNECTED';
 
-                // #WDD [2026-01-20] 仅在页面加载后第一次连接时尝试读取缓存
                 if (!hasInitialScanned) {
                     const path = document.getElementById('project-dir').value;
                     if (path) {
@@ -268,6 +292,23 @@
                 const msg = JSON.parse(e.data);
                 if (msg.type === 'initial_state' || msg.type === 'status_update') {
                     state = { ...state, ...msg.data };
+
+                    // #WDD [2026-01-20] [新增] 更新最后更新时间
+                    lastUpdateTime = Date.now();
+
+                    // 检查是否正在运行，如果是则启动计时器
+                    const syncStage = state.stages.find(s => s.id === 'sync_frame_extraction');
+                    if (syncStage && syncStage.status === 'running') {
+                        if (!elapsedTimerInterval) {
+                            elapsedTimerInterval = setInterval(updateElapsedTimer, 1000);
+                        }
+                    } else {
+                        if (elapsedTimerInterval) {
+                            clearInterval(elapsedTimerInterval);
+                            elapsedTimerInterval = null;
+                        }
+                    }
+
                     render();
                 }
             };
@@ -283,7 +324,6 @@
             if (res.directory) {
                 document.getElementById('project-dir').value = res.directory;
                 localStorage.setItem('prjRoot', res.directory);
-                // #WDD [2026-01-20] 选择新路径后允许重新触发一次加载
                 hasInitialScanned = true;
                 startScan(false);
             }
@@ -299,29 +339,141 @@
             });
         }
 
-        async function startSync() {
+        async function startSync(force = false) {
             const path = document.getElementById('project-dir').value;
             if (!path) return alert("Please select path");
+            if (force && !confirm("This will delete existing synchronization plan and start over. Continue?")) return;
+
             await fetch('/api/pipeline/sync', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ project_directory: path })
+                body: JSON.stringify({ project_directory: path, force_restart: force })
             });
+        }
+
+        // #WDD [2026-01-20] [新增] 停止管线函数
+        async function stopPipeline() {
+            if (!confirm("Are you sure you want to stop the pipeline? Progress will be saved.")) return;
+            await fetch('/api/pipeline/stop', { method: 'POST' });
+        }
+
+        // #WDD [2026-01-20] [新增] 更新空闲计时器
+        function updateElapsedTimer() {
+            const elapsed = Math.floor((Date.now() - lastUpdateTime) / 1000);
+            const timerEl = document.getElementById('idle-timer');
+            if (timerEl) {
+                if (elapsed >= 3) {
+                    // 显示等待时间
+                    const mins = Math.floor(elapsed / 60);
+                    const secs = elapsed % 60;
+                    timerEl.innerText = mins > 0 ? `等待中 ${mins}m ${secs}s` : `等待中 ${secs}s`;
+                    timerEl.style.display = 'inline';
+                } else {
+                    timerEl.style.display = 'none';
+                }
+            }
+        }
+
+        let timelineData = [];
+
+        async function loadTimeline() {
+            const path = document.getElementById('project-dir').value;
+            const btn = document.getElementById('btn-load-viz');
+            if (btn) btn.innerText = "LOADING...";
+
+            const res = await fetch('/api/pipeline/visualize', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ project_directory: path })
+            }).then(r => r.json());
+
+            if (res.error) {
+                alert(res.error);
+                if (btn) btn.innerText = "LOAD TIMELINE";
+                return;
+            }
+
+            timelineData = res.timeline;
+            renderTimelineData();
+            if (btn) btn.innerText = "REFRESH TIMELINE";
+        }
+
+        function renderTimelineData() {
+            const grid = document.getElementById('timeline-grid');
+            if (!grid) return;
+
+            grid.innerHTML = timelineData.map(t => {
+                const rep = t.views[0];
+                const thumbUrl = `/api/pipeline/frame_thumb?path=${encodeURIComponent(rep.path)}&time=${rep.real_time}`;
+
+                return `
+                <div class="v-card" onclick="openViewModal(${t.frame_idx})" style="cursor:pointer">
+                     <div style="position:relative; aspect-ratio:16/9; background:#000; overflow:hidden">
+                        <img src="${thumbUrl}" class="v-thumb" loading="lazy">
+                        <div style="position:absolute; bottom:5px; right:5px; background:rgba(0,0,0,0.7); border-radius:4px; padding:2px 6px; font-size:0.6rem; font-family:var(--font-mono)">
+                            CAM: ${t.views.length}
+                        </div>
+                     </div>
+                     <div class="v-info">
+                        <div class="v-name">Frame #${t.frame_idx}</div>
+                         <div class="v-meta">
+                            <span>Time: <strong>${t.ideal_time.toFixed(3)}s</strong></span>
+                        </div>
+                     </div>
+                </div>
+                `;
+            }).join('');
+        }
+
+        function openViewModal(idx) {
+            const item = timelineData.find(t => t.frame_idx === idx);
+            if (!item) return;
+
+            const modal = document.getElementById('view-modal');
+            const grid = document.getElementById('modal-grid');
+            document.getElementById('modal-title').innerText = `Frame #${idx} (Ideal: ${item.ideal_time.toFixed(3)}s)`;
+
+            grid.innerHTML = item.views.map(v => `
+                 <div class="v-card">
+                     <div style="position:relative; aspect-ratio:16/9; background:#000">
+                        <img src="/api/pipeline/frame_thumb?path=${encodeURIComponent(v.path)}&time=${v.real_time}" class="v-thumb" loading="lazy">
+                     </div>
+                     <div class="v-info">
+                        <div class="v-name" style="font-size:0.75rem">${v.video}</div>
+                        <div class="v-meta" style="margin-top:0.5rem">
+                            <span style="color:var(--accent)">Sync Time: <strong>${v.global_time.toFixed(4)}s</strong></span>
+                        </div>
+                        <div class="v-meta">
+                            <span>Real Time: ${v.real_time.toFixed(4)}s</span>
+                        </div>
+                     </div>
+                 </div>
+            `).join('');
+
+            modal.style.display = 'block';
         }
 
         function render() {
             const tabsContainer = document.getElementById('tabs-container');
+            const mainView = document.getElementById('main-content');
+
+            if (!state.stages || state.stages.length === 0) {
+                state.stages = [
+                    { "id": "video_to_frames", "name": "Videos", "status": "pending" },
+                    { "id": "sync_frame_extraction", "name": "Sync Extraction", "status": "pending" }
+                ];
+            }
+
             tabsContainer.innerHTML = `<div style="font-size:0.65rem; color:var(--text-secondary); margin-bottom:1rem; opacity:0.5; text-transform:uppercase; letter-spacing:1px">Sequence</div>` +
                 state.stages.map(s => `
                 <div class="tab ${state.selected_id === s.id ? 'selected' : ''}" onclick="selectTab('${s.id}')">
                     <div class="tab-name">${s.name}</div>
                     <div class="tab-status" style="color:${getStatusColor(s.status)}">
-                        ${s.status === 'running' ? `In Progress ${s.progress}%` : s.status}
+                        ${s.status === 'running' ? `In Progress ${s.progress || 0}%` : s.status}
                     </div>
                 </div>
             `).join('');
 
-            const mainView = document.getElementById('main-content');
             const selected = state.stages.find(s => s.id === state.selected_id);
             if (!selected) return;
 
@@ -364,34 +516,104 @@
                     ` : `<div style="text-align:center; padding-top:100px; opacity:0.3">No videos loaded. Configure PROJECT_ROOT and click Refresh.</div>`}
                 `;
             } else if (state.selected_id === 'sync_frame_extraction') {
+                const isRunning = selected.status === 'running';
+
+                let subProgress = 0;
+                let displayMsg = selected.message || 'Ready to sync';
+
+                const match = displayMsg.match(/(\d+)%/);
+                if (match) {
+                    subProgress = parseInt(match[1]);
+                }
+
                 mainView.innerHTML = `
                     <div style="display:flex; justify-content:space-between; align-items:flex-end; border-bottom:1px solid var(--border-subtle); padding-bottom:1.5rem; margin-bottom:2rem">
                         <div>
                             <h1 style="font-size:1.75rem">${selected.name}</h1>
-                            <p style="color:var(--accent); font-family:var(--font-mono); font-size:0.8rem; margin-top:0.5rem">${selected.message || 'Ready to sync'}</p>
+                            <div style="display:flex; align-items:center; margin-top:0.5rem">
+                                ${isRunning ? '<div class="spinner"></div>' : ''}
+                                <p style="color:var(--accent); font-family:var(--font-mono); font-size:0.8rem; margin:0">${displayMsg}</p>
+                            </div>
                         </div>
-                        <button class="btn btn-primary" onclick="startSync()" ${selected.status === 'running' || state.videos.length === 0 ? 'disabled' : ''}>
-                            ${selected.status === 'running' ? 'SYNCING...' : 'START SYNC EXTRACTION'}
-                        </button>
+                        <div style="display:flex; gap:1rem">
+                             ${isRunning ? `<button class="btn" style="background:#ff6b35; color:white" onclick="stopPipeline()">
+                                ⏹ STOP
+                            </button>` : ''}
+                             <button class="btn" style="background:var(--error); color:white" onclick="startSync(true)" ${isRunning ? 'disabled' : ''}>
+                                FORCE RESTART
+                            </button>
+                            <button class="btn btn-primary" onclick="startSync(false)" ${isRunning ? 'disabled' : ''}>
+                                ${isRunning ? 'SYNCING...' : 'RESUME / START'}
+                            </button>
+                        </div>
                     </div>
 
-                    <div style="background:var(--bg-panel); border:1px solid var(--border-subtle); border-radius:12px; padding:2rem; max-width:600px">
+                    <div style="background:var(--bg-panel); border:1px solid var(--border-subtle); border-radius:12px; padding:2rem; margin-bottom: 2rem">
                         <h4 style="margin-bottom:1rem; opacity:0.7">Status Summary</h4>
                         <div style="display:grid; grid-template-columns:1fr 1fr; gap:1.5rem">
                             <div class="v-meta"><span>Input Videos:</span> <strong>${state.videos.length}</strong></div>
-                            <div class="v-meta"><span>Method:</span> <strong>Audio Alignment</strong></div>
-                            <div class="v-meta"><span>Stage:</span> <strong style="color:var(--accent)">${selected.status}</strong></div>
-                            <div class="v-meta"><span>Progress:</span> <strong>${selected.progress}%</strong></div>
-                        </div>
-                        
-                        ${selected.status === 'completed' ? `
-                            <div style="margin-top:2rem; padding-top:1.5rem; border-top:1px dashed var(--border-subtle)">
-                                <div style="color:var(--success); font-size:0.8rem; margin-bottom:0.5rem">✓ Extraction plan generated and saved.</div>
-                                <div style="font-size:0.75rem; color:var(--text-secondary)">Data: mirrortime_results/extraction_plan.json</div>
+                            <div class="v-meta"><span>Current Status:</span> <strong style="color:var(--accent)">${selected.status}</strong></div>
+                            
+                            <!-- Global Progress -->
+                            <div class="v-meta" style="grid-column: 1 / -1"><span>Total Progress:</span> 
+                                <div style="display:flex; align-items:center; gap:10px; margin-top:5px">
+                                    <div style="flex:1; height:8px; background:#333; border-radius:4px; overflow:hidden">
+                                        <div style="width:${selected.progress || 0}%; height:100%; background:var(--accent); transition: width 0.3s ease"></div>
+                                    </div>
+                                    <strong style="min-width:40px; text-align:right">${selected.progress || 0}%</strong>
+                                </div>
                             </div>
-                        ` : ''}
+
+                            <!-- Sub Progress (Current Task) -->
+                            ${isRunning ? `
+                            <div class="v-meta" style="grid-column: 1 / -1"><span>Current Task Activity:</span> 
+                                <div style="display:flex; align-items:center; gap:10px; margin-top:5px">
+                                    <div style="flex:1; height:4px; background:#333; border-radius:2px; overflow:hidden">
+                                        <div style="width:${subProgress}%; height:100%; background:var(--success); transition: width 0.3s ease"></div>
+                                    </div>
+                                    <strong style="min-width:40px; text-align:right; font-size:0.7rem; color:var(--success)">${subProgress}%</strong>
+                                    <span id="idle-timer" style="display:none; font-size:0.65rem; color:#ff9800; margin-left:8px"></span>
+                                </div>
+                            </div>
+                            ` : ''}
+                        </div>
+                    </div>
+
+                    <!-- Log Display Area -->
+                    <div id="log-container" style="background:var(--bg-input); border:1px solid var(--border-subtle); border-radius:8px; padding:1rem; margin-bottom:2rem; max-height:200px; overflow-y:auto">
+                        <div style="font-size:0.65rem; color:var(--text-secondary); margin-bottom:0.5rem; text-transform:uppercase; letter-spacing:1px">Console Output (${(state.logs || []).length} lines)</div>
+                        <div id="log-output" style="font-family:var(--font-mono); font-size:0.7rem; color:var(--text-secondary); white-space:pre-wrap; word-break:break-word; line-height:1.4">
+${(state.logs || []).slice(-20).join('\n') || displayMsg}
+                        </div>
+                    </div>
+
+                    ${(selected.status === 'completed' || selected.status === 'running') ? `
+                        <div id="timeline-viz">
+                            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem">
+                                <h3>Timeline Visualization</h3>
+                                <button class="btn btn-browse" onclick="loadTimeline()" id="btn-load-viz">LOAD TIMELINE</button>
+                            </div>
+                            <div id="timeline-grid" class="video-grid" style="grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));"></div>
+                        </div>
+                    ` : ''}
+                    
+                    <!-- View Modal -->
+                    <div id="view-modal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.9); z-index:1000; padding:2rem; overflow:auto">
+                        <div style="max-width:1200px; margin:0 auto">
+                            <div style="display:flex; justify-content:space-between; margin-bottom:2rem">
+                                <h2 id="modal-title">Frame Views</h2>
+                                <button class="btn" onclick="document.getElementById('view-modal').style.display='none'">CLOSE</button>
+                            </div>
+                            <div id="modal-grid" style="display:grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap:2rem"></div>
+                        </div>
                     </div>
                 `;
+
+                // #WDD [2026-01-20] [新增] 自动滚动日志到底部
+                setTimeout(() => {
+                    const logContainer = document.getElementById('log-container');
+                    if (logContainer) logContainer.scrollTop = logContainer.scrollHeight;
+                }, 50);
             } else {
                 mainView.innerHTML = `<div style="text-align:center; padding-top:100px; opacity:0.3"><h3>${selected.name}</h3><p>Visualization coming soon.</p></div>`;
             }
@@ -405,6 +627,7 @@
         }
 
         document.getElementById('project-dir').value = localStorage.getItem('prjRoot') || '';
+        render();
         connect();
     </script>
 </body>
