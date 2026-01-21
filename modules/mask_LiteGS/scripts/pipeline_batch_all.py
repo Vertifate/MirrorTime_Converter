@@ -24,7 +24,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Full Pipeline Batch: Train -> Clean -> Mask")
     # 路径参数
     parser.add_argument("--base_dir", required=True, help="包含多个 frameXXXX 目录及 sparse 的根目录")
-    parser.add_argument("--output_root", required=True, help="训练输出根目录")
+    parser.add_argument("--output_root", default=None, help="训练输出根目录 (默认: base_dir/tem)")
     parser.add_argument("--images_folder", default="images", help="帧目录下的图像子目录名")
     parser.add_argument("--sparse_dir", default=None, help="稀疏重建目录，默认 base_dir/sparse")
     
@@ -40,6 +40,7 @@ def parse_args():
     
     # Mask 生成控制
     parser.add_argument("--skip_mask", action="store_true", help="跳过 Mask 生成阶段")
+    parser.add_argument("--save_images_masked", action="store_true", help="是否保存带 Mask 的合成图像 (images_masked)")
     
     # 其他
     parser.add_argument("--extra_train_args", nargs=argparse.REMAINDER, help="传递给训练脚本的额外参数")
@@ -71,7 +72,13 @@ def main():
     root_dir = script_dir.parent
     
     base_dir = Path(args.base_dir).resolve()
-    output_root = Path(args.output_root).resolve()
+    if args.output_root:
+        output_root = Path(args.output_root).resolve()
+    else:
+        output_root = base_dir / "tem"
+        
+    print(f"Output Root: {output_root}")
+    
     sparse_src = Path(args.sparse_dir).resolve() if args.sparse_dir else base_dir / "sparse"
     
     #WDD 2026-01-02 默认在输出根目录下汇总
@@ -153,8 +160,13 @@ def main():
                 "--image_dir", args.images_folder,
                 "--input_ply", str(ply_cleaned)
             ]
+            if args.save_images_masked:
+                mask_cmd.append("--save_images_masked")
+            
             run_step(f"MaskGen {frame_name}", mask_cmd, env)
-
+            
+            # Post-process cleanup is no longer needed as generate_masks.py handles conditional generation
+    
     print("\n[All Done] Pipeline completed for all frames.")
 
 if __name__ == "__main__":
