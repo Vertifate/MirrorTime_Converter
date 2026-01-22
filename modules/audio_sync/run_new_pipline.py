@@ -29,13 +29,16 @@ except ImportError:
     piexif = None
 
 class GlobalTimelineConfig:
-    def __init__(self, start_time: float, end_time: float, framerate: float):
+    def __init__(self, start_time: float = None, end_time: float = None, framerate: float = 30.0):
         self.start_time = start_time
         self.end_time = end_time
         self.framerate = framerate
 
     @property
     def total_frames(self):
+        # 如果未初始化时间，返回0
+        if self.start_time is None or self.end_time is None:
+            return 0
         duration = self.end_time - self.start_time
         if duration <= 0: return 0
         return int(duration * self.framerate) + 1
@@ -70,12 +73,13 @@ class VideoSyncInfo:
 class PipelineManager:
     def __init__(self, video_dir, output_dir, use_sync, 
                  global_timeline_cfg: GlobalTimelineConfig, 
-                 max_workers=None):
+                 max_workers=None, use_cuda=False):
         self.video_dir = video_dir
         self.output_dir = output_dir
         self.use_sync = use_sync
         self.global_cfg = global_timeline_cfg
         self.max_workers = max_workers or os.cpu_count() or 4
+        self.use_cuda = use_cuda
         
         self.video_files = self._scan_videos()
         self.video_sync_infos = []
@@ -119,6 +123,12 @@ class PipelineManager:
             print("      所有视频将假定为已对齐 (Offset=0, Drift=1.0)。")
             for v in self.video_files:
                 self.video_sync_infos.append(VideoSyncInfo(v, 1.0, 0.0))
+            
+            # Non-Sync 模式下的默认值处理
+            if self.global_cfg.start_time is None: self.global_cfg.start_time = 0.0
+            if self.global_cfg.end_time is None: 
+                print("警报: 在非同步模式下未指定 global_end，默认设为 10.0s")
+                self.global_cfg.end_time = 10.0
             return
 
         # 实例化音频同步系统
@@ -173,9 +183,20 @@ class PipelineManager:
             print(f"检测到全局参考零点 (第一次快板): {global_zero_shift:.4f}s (参考视频时间)")
             print(f"检测到全局终点 (最后一次快板): {max_global_limit:.4f}s (相对时长)")
             
-            # 强制限制抽帧范围
+            # --- 动态范围处理 ---
+            # 如果 global_start 为 None (默认), 设为 0.0
+            if self.global_cfg.start_time is None:
+                 print(f"[提示] 未指定 global_start，默认设为 0.0s")
+                 self.global_cfg.start_time = 0.0
+
+            # 如果 global_end 为 None (默认), 设为 max_global_limit
+            if self.global_cfg.end_time is None:
+                 print(f"[提示] 未指定 global_end，默认设为最大全局时间轴: {max_global_limit:.4f}s")
+                 self.global_cfg.end_time = max_global_limit
+            
+            # 强制限制抽帧范围 (仅当已指定且超出时)
             if self.global_cfg.end_time > max_global_limit:
-                print(f"\n[提示] 设定的结束时间 ({self.global_cfg.end_time}s) 超出了最大全局时间轴 (Last Clapper: {max_global_limit:.4f}s)。")
+                print(f"[提示] 设定的结束时间 ({self.global_cfg.end_time:.4f}s) 超出了最大全局时间轴。")
                 print(f"       -> 已强制限制抽帧范围至 {max_global_limit:.4f}s。")
                 self.global_cfg.end_time = max_global_limit
         else:
@@ -332,9 +353,18 @@ class PipelineManager:
             # relative_end = end_scan - seek_time
             # filter: between(t, relative_start, relative_end)
             
+            # 尝试开启 GPU 加速
+            # 这里简单硬编码，如果环境中支持 cuda 则会加速，否则可能会报错或回退（取决于 FFmpeg 编译）
+            # 为了安全，我们通过参数传入或者先检测。这里默认尝试添加 -hwaccel cuda
+            # 如果失败率高，建议由用户参数控制。
+            
+            ffmpeg_input_args = {'ss': seek_time}
+            if self.use_cuda:
+                ffmpeg_input_args['hwaccel'] = 'cuda'
+
             cmd = (
                 ffmpeg
-                .input(v_info.file_path, ss=seek_time)
+                .input(v_info.file_path, **ffmpeg_input_args)
                 .filter('select', f'between(t,{start_scan - seek_time},{end_scan - seek_time})')
                 .filter('showinfo')
                 .output(temp_pattern, vsync=0, **{'q:v': 2})
@@ -426,11 +456,9 @@ class PipelineManager:
                 out_name = os.path.splitext(v_info.basename)[0] + ".jpg"
                 out_path = os.path.join(frame_out_dir, out_name)
                 
-                # 移动文件 (复制)
-                shutil.copy2(source_file, out_path)
-                
-                # 注入元数据
-                self._inject_metadata(out_path, v_info, ideal_t, real_t, g_time, fps)
+                # 优化: 合并 "复制文件" 与 "注入元数据" 为一步
+                # 直接读取源文件 Image，注入元数据后保存到目标路径，避免两次 IO 写操作
+                self._save_with_metadata(source_file, out_path, v_info, ideal_t, real_t, g_time, fps)
                 
                 pbar.update(1)
 
@@ -444,10 +472,10 @@ class PipelineManager:
             if os.path.exists(temp_dir):
                 shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def _inject_metadata(self, image_path, v_info, ideal_local, real_local, ideal_global_ts, fps):
+    def _save_with_metadata(self, src_path, dst_path, v_info, ideal_local, real_local, ideal_global_ts, fps):
         """
-        MirrorTime 元数据注入
-        MirrorTime = Global Frame Number of the ACTUAL frame (including decimal error).
+        读取 src_path，注入 MirrorTime 元数据，直接保存到 dst_path。
+        减少了一次 shutil.copy 的 IO 开销。
         """
         # Calculate Real Global Time
         real_global_ts = v_info.local_to_global(real_local)
@@ -456,26 +484,37 @@ class PipelineManager:
         mirror_time_frame = real_global_ts * fps
         
         meta = {
-            "MirrorTime": mirror_time_frame, # Changed from seconds to frame number
+            "MirrorTime": mirror_time_frame,
             "GlobalTimestamp": real_global_ts,
             "LocalTimestamp": real_local,
             "IdealGlobalFrame": int(round(ideal_global_ts * fps)),
             "VideoSource": v_info.basename
         }
         
-        if piexif:
-            try:
-                meta_json = json.dumps(meta)
-                # UserComment tag
-                user_comment = b"ASCII\0\0\0" + meta_json.encode("utf-8")
-                exif_dict = {"Exif": {piexif.ExifIFD.UserComment: user_comment}}
-                exif_bytes = piexif.dump(exif_dict)
-                piexif.insert(exif_bytes, image_path)
-            except Exception as e:
-                pass
-        else:
-            # Fallback simple
-            pass
+        try:
+            # 准备 EXIF
+            exif_bytes = None
+            if piexif:
+                try:
+                    meta_json = json.dumps(meta)
+                    user_comment = b"ASCII\0\0\0" + meta_json.encode("utf-8")
+                    exif_dict = {"Exif": {piexif.ExifIFD.UserComment: user_comment}}
+                    exif_bytes = piexif.dump(exif_dict)
+                except Exception as e:
+                    pass
+
+            with Image.open(src_path) as img:
+                # 保存到目标路径
+                # quality=95 保证高质量，subsampling=0 关闭色度抽样以保真
+                if exif_bytes:
+                    img.save(dst_path, exif=exif_bytes, quality=95, subsampling=0)
+                else:
+                    img.save(dst_path, quality=95, subsampling=0)
+                    
+        except Exception as e:
+            # 如果一般保存失败，降级为直接复制
+            # print(f"Error saving image {dst_path}: {e}, falling back to copy.")
+            shutil.copy2(src_path, dst_path)
 
 def main():
     parser = argparse.ArgumentParser(description="MirrorTime 全流程处理管线", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -504,12 +543,13 @@ def main():
     #    - 若不启用同步: 您可以自由设置范围，甚至外推。
     #    - 'global_start' 可以为负数 (例如提取快板前的画面)。
     timeline_group = parser.add_argument_group('Global Timeline Extraction', '定义希望提取的全局时间范围 (0.0 = 第一次快板)')
-    timeline_group.add_argument("--global_start", type=float, default=1.0, help="抽帧起始时间 (相对于全局0点)")
-    timeline_group.add_argument("--global_end", type=float, default=2.0, help="抽帧结束时间 (相对于全局0点)")
+    timeline_group.add_argument("--global_start", type=float, default=None, help="抽帧起始时间 (默认为0.0)")
+    timeline_group.add_argument("--global_end", type=float, default=None, help="抽帧结束时间 (默认为最大全局时间)")
     timeline_group.add_argument("--fps", type=float, default=30.0, help="全局抽帧频率 (FPS)")
     
     # 性能参数
-    parser.add_argument("--workers", type=int, default=4, help="并行处理线程数")
+    parser.add_argument("--workers", type=int, default=16, help="并行处理线程数")
+    parser.add_argument("--cuda", action='store_true', help="尝试使用 NVENC/CUDA 硬件加速解码")
     
     args = parser.parse_args()
 
@@ -529,7 +569,8 @@ def main():
         output_dir=args.output_dir,
         use_sync=args.use_sync,
         global_timeline_cfg=config,
-        max_workers=args.workers
+        max_workers=args.workers,
+        use_cuda=args.cuda
     )
     
     # 注入额外的音频参数给 manager (需要修改 PipelineManager 接收这些参数，或者直接传给 AudioSyncSystem)
