@@ -13,11 +13,19 @@ from litegs.io_manager.ply import load_ply, save_ply
 
 from scipy.spatial import ConvexHull
 
-def get_convex_hull_info(points, scale=1.0):
+def get_convex_hull_info(points, scale=1.0, center_offset=None, manual_radius=-1, manual_height=-1):
     """
     #WDD 2026-01-02 优化：通过添加虚拟端点强制凸包在轴向上具有足够高度（解决摄像头共面问题）
+    #WDD 2026-01-22 Update: Support manual cylinder control (offset, radius, height)
     """
+    if center_offset is None: center_offset = np.zeros(3)
+    
+    # 1. Base centroid from points
     centroid = np.mean(points, axis=0)
+    
+    # Apply manual offset to centroid
+    centroid += np.array(center_offset)
+    
     centered = points - centroid
     
     # 使用SVD估计圆柱轴线（法线方向）和水平面半径
@@ -27,28 +35,88 @@ def get_convex_hull_info(points, scale=1.0):
     # 计算摄像头距离轴心的平均半径，用作高度参考
     projections = centered - np.outer(centered @ axis_vector, axis_vector)
     radii = np.linalg.norm(projections, axis=1)
-    mean_radius = np.mean(radii)
+    
+    # Determine Radius
+    if manual_radius > 0:
+        mean_radius = manual_radius
+    else:
+        mean_radius = np.mean(radii)
+    
+    # Determine Height (Half-height)
+    if manual_height > 0:
+        height_half = manual_height / 2.0
+        # If manual height is set, we ignore "scale" for height, but still use scale for radius if manual_radius not set?
+        # To keep it simple: manual_radius/height defines the base geometry. 'scale' arg is applied at the very end.
+        # But if manual params are used, user likely expects exactness. 
+        # Let's say: if manual params are set, we construct the hull to Match those params *before* scaling, 
+        # or we treat manual params as the FINAL desired size (implying scale=1.0 effectively).
+        # Decision: Use manual params to build the "unit" cylinder, then apply scale.
+        # actually, if user gives radius=1.0, they expect 1.0. 
+        # Let's apply scale normally. So if user wants exactly 1.0, they should set scale=1.0 or user input / scale.
+        # Better: manual overrides are absolute. If set, they replace the auto-calc value used before scaling.
+    else:
+        height_half = mean_radius * 2 # Default logic
     
     # 构造变换后的点集
-    # 如果摄像头都在一个平面上，直接乘以2还是0。
-    # 我们通过添加位于轴向两端的虚拟点来强制拉伸空间区域。
-    # 设定高度为半径的 2 倍（向上下各延伸一个半径长度）
-    height_offset = axis_vector * mean_radius * 2
+    height_offset = axis_vector * height_half
     
-    virtual_top = centered + height_offset
-    virtual_bottom = centered - height_offset
+    # We construct a cylinder-like hull. 
+    # To be robust, we project all points to the axis plane (circle), normalize them to radius, then extrude.
+    # OR simpler: just add top/bottom virtual points at the Manual Radius distance?
+    # No, 'points' are camera centers. We want to wrap them.
+    # If we want to ENABLE manual control, we should probably ignore camera distribution if params are fixed?
+    # BUT, axis_vector is still useful from cameras.
     
-    # 合并所有点（原始点+上下拉伸点）
-    combined_points = np.vstack([virtual_top, virtual_bottom])
+    # Let's stick to the previous 'virtual points' strategy but enforced with new radius/height
+    # The previous code took 'points' (cameras), added virtual top/bottom, then scaled.
+    # If we want a fixed cylinder, we might not want to depend on camera spread for the hull "width".
+    # We should construct a synthetic cylinder instead.
     
-    # 最后统一按比例缩小
-    scaled_points = centroid + combined_points * scale
+    # Construct a synthetic cylinder vertices
+    num_sides = 16
+    angles = np.linspace(0, 2*np.pi, num_sides, endpoint=False)
     
-    # 增加微小扰动防止共面
-    scaled_points += np.random.normal(0, 1e-6, scaled_points.shape)
+    # Create a circle on the plane perpendicular to axis_vector
+    # Need two basis vectors perpendicular to axis_vector
+    # axis_vector is normalized (from SVD Vh)
+    
+    v = axis_vector
+    if abs(v[0]) > 0.9: 
+        arbitrary = np.array([0, 1, 0])
+    else: 
+        arbitrary = np.array([1, 0, 0])
+    
+    u1 = np.cross(v, arbitrary)
+    u1 /= np.linalg.norm(u1)
+    u2 = np.cross(v, u1)
+    
+    circle_points = []
+    for theta in angles:
+        p = mean_radius * (np.cos(theta) * u1 + np.sin(theta) * u2)
+        circle_points.append(p)
+    circle_points = np.array(circle_points)
+    
+    # Top and Bottom rings
+    top_ring = circle_points + height_offset
+    bottom_ring = circle_points - height_offset
+    
+    combined_points = np.vstack([top_ring, bottom_ring])
+    
+    # If we just use these points, the hull is a cylinder.
+    # But wait, the original code combined 'centered' (cameras) with virtual points so the hull covers cameras + extension.
+    # If user specifies radius/height, they likely want that EXACT cylinder, regardless of cameras.
+    # So we should define the hull PURELY by these synthetic points.
+    
+    hull_points = combined_points
+    
+    # Apply scale (if user wants to shrink the MANUALLY defined cylinder via simple param? 
+    # Usually manual > scale logic. Let's assume manual params are PRE-scale, 
+    # OR simply: result = centroid + hull_points * scale. 
+    # If user says radius=1.0, scale=0.8, result radius is 0.8.
+    
+    scaled_points = centroid + hull_points * scale
     
     hull = ConvexHull(scaled_points)
-    #WDD 2026-01-02 返回拟合出的圆柱平均半径和轴向量
     return hull.equations, centroid, mean_radius, axis_vector
 
 def filter_artifacts(xyz_np, sh_0_np, scale_np, opacity_np, centroid, axis_vector, mean_radius, k=25, std_ratio=2.0, brightness_thresh=0.015, opacity_thresh=0.02):
@@ -184,6 +252,11 @@ def main():
     parser.add_argument("--sor_std", type=float, default=1.5, help="Std ratio for SOR filtering")
     parser.add_argument("--camera_radius", type=float, default=0.0, help="Ratio of cylinder radius for camera proximity filtering (e.g. 0.1)")
     
+    # New arguments for manual control
+    parser.add_argument("--center_offset", type=float, nargs=3, default=[0.0, 0.0, 0.0], help="Offset for the cylinder center (x, y, z)")
+    parser.add_argument("--cylinder_radius", type=float, default=-1.0, help="Manual cylinder radius override")
+    parser.add_argument("--cylinder_height", type=float, default=-1.0, help="Manual cylinder height override")
+
     args = parser.parse_args()
     
     # #WDD 2026-01-02 读取摄像机参数并计算内角凸包，裁剪高斯点，过滤离群黑色噪声
@@ -204,8 +277,17 @@ def main():
     cam_centers = np.array(cam_centers)
     
     print(f"Found {len(cam_centers)} cameras. Computing convex hull...")
-    equations, centroid, mean_radius, axis_vector = get_convex_hull_info(cam_centers, args.scale)
-    print(f"Detected cylinder mean radius: {mean_radius:.4f}")
+    print(f"Config: Offset={args.center_offset}, Radius={args.cylinder_radius}, Height={args.cylinder_height}")
+    
+    equations, centroid, mean_radius, axis_vector = get_convex_hull_info(
+        cam_centers, 
+        scale=args.scale, 
+        center_offset=args.center_offset,
+        manual_radius=args.cylinder_radius,
+        manual_height=args.cylinder_height
+    )
+    print(f"Cylinder mean radius (after setup): {mean_radius:.4f}")
+    print(f"Cylinder centroid: {centroid}")
 
     print(f"Loading PLY: {args.input_ply}")
     xyz, scale, rot, sh_0, sh_rest, opacity = load_ply(args.input_ply, args.sh_degree)

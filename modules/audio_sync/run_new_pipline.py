@@ -224,7 +224,7 @@ class PipelineManager:
             
             self.video_sync_infos.append(VideoSyncInfo(path, old_drift, new_offset))
             
-            print(f"  > {os.path.basename(path)}: Drift={old_drift:.6f}, GlobalOffset={new_offset:.4f}s")
+            # print(f"  > {os.path.basename(path)}: Drift={old_drift:.6f}, GlobalOffset={new_offset:.4f}s")
 
     def run_frame_extraction(self):
         """步骤2 & 3: 从全局时间轴逆算并提取"""
@@ -317,7 +317,7 @@ class PipelineManager:
         max_t = items[-1]['target_local']
         
         # 加上一点缓冲 (Buffer)
-        buffer = 1.0 
+        buffer = 0.5
         start_scan = max(0, min_t - buffer)
         end_scan = max_t + buffer
         
@@ -345,7 +345,7 @@ class PipelineManager:
             # 为了准确性，我们不使用 -ss (除非我们确信), 或者我们只在 start_scan 很大时使用
             # 考虑到效率，必须使用 seek
             
-            seek_time = max(0, start_scan - 5.0) # 提前5秒 seek 以确保关键帧并留缓冲
+            seek_time = max(0, start_scan - 0.5) # 提前0.5秒 seek 以确保关键帧并留缓冲 (用户修改: 5.0 -> 0.5)
             
             # 修正 select 时间: 如果 seek 了，t 会从 0 开始算 (如果不加 -copyts)
             # 为了逻辑简单，我们不使用 -copyts，而是调整 filter 时间
@@ -543,12 +543,12 @@ def main():
     #    - 若不启用同步: 您可以自由设置范围，甚至外推。
     #    - 'global_start' 可以为负数 (例如提取快板前的画面)。
     timeline_group = parser.add_argument_group('Global Timeline Extraction', '定义希望提取的全局时间范围 (0.0 = 第一次快板)')
-    timeline_group.add_argument("--global_start", type=float, default=None, help="抽帧起始时间 (默认为0.0)")
-    timeline_group.add_argument("--global_end", type=float, default=None, help="抽帧结束时间 (默认为最大全局时间)")
+    timeline_group.add_argument("--global_start", type=float, default=0, help="抽帧起始时间 (默认为0.0)")
+    timeline_group.add_argument("--global_end", type=float, default=0.1, help="抽帧结束时间 (默认为最大全局时间)")
     timeline_group.add_argument("--fps", type=float, default=30.0, help="全局抽帧频率 (FPS)")
     
     # 性能参数
-    parser.add_argument("--workers", type=int, default=16, help="并行处理线程数")
+    parser.add_argument("--workers", type=int, default=8, help="并行处理线程数")
     parser.add_argument("--cuda", action='store_true', help="尝试使用 NVENC/CUDA 硬件加速解码")
     
     args = parser.parse_args()

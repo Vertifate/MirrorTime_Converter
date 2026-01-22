@@ -35,8 +35,12 @@ class PinHoleCameraInfo(CameraInfo):
         super(PinHoleCameraInfo,self).__init__(id,"PINHOLE",width,height)
         focal_length_x=parameters[0]
         focal_length_y=parameters[1]
+        # Note: parameters[2] and parameters[3] are cx, cy (principal point)
+        # LiteGS assumes principal point is at image center, so we ignore cx/cy here
+        
         recp_tan_half_fov_x=focal_length_x/(width*0.5)
         recp_tan_half_fov_y=focal_length_y/(height*0.5)
+        
         self.intr_params=recp_tan_half_fov_x.astype(np.float32)
         self.proj_matrix=np.array([[recp_tan_half_fov_x,0,0,0],
                   [0,recp_tan_half_fov_y,0,0],
