@@ -14,6 +14,7 @@ from litegs.io_manager.colmap import load_frames
 from litegs.io_manager.ply import load_ply
 from litegs import render
 from litegs import arguments
+from litegs.scene import cluster as cluster_utils
 
 def main():
     parser = argparse.ArgumentParser(description="Generate masks from Gaussian Splatting model")
@@ -30,7 +31,45 @@ def main():
     except Exception as e:
         print(f"Error loading frames: {e}")
         return
-# ... lines 30-94 ...
+
+    # Initialize device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # Load PLY
+    print(f"Loading PLY from {args.input_ply}...")
+    # Use sh_degree=3 to ensure safe loading of all attributes
+    xyz, scale, rot, sh_0, sh_rest, opacity = load_ply(args.input_ply, 3)
+    
+    # Process data to device
+    xyz = torch.tensor(xyz, dtype=torch.float32, device=device).requires_grad_(False)
+    scale = torch.tensor(scale, dtype=torch.float32, device=device).requires_grad_(False)
+    rot = torch.tensor(rot, dtype=torch.float32, device=device).requires_grad_(False)
+    sh_0 = torch.tensor(sh_0, dtype=torch.float32, device=device).requires_grad_(False)
+    sh_rest = torch.tensor(sh_rest, dtype=torch.float32, device=device).requires_grad_(False)
+    opacity = torch.tensor(opacity, dtype=torch.float32, device=device).requires_grad_(False)
+    
+    print(f"DEBUG: Shapes before clustering:")
+    print(f"xyz: {xyz.shape}")
+    print(f"scale: {scale.shape}")
+    print(f"rot: {rot.shape}")
+    print(f"sh_0: {sh_0.shape}")
+    # print(f"sh_rest: {sh_rest.shape}")
+    print(f"opacity: {opacity.shape}")
+
+    # Cluster points (Required for render_preprocess)
+    print("Clustering points...")
+    chunk_size = 256
+    xyz, scale, rot, sh_0, sh_rest, opacity = cluster_utils.cluster_points(chunk_size, xyz, scale, rot, sh_0, sh_rest, opacity)
+
+    # Cluster points (Required for render_preprocess)
+    print("Clustering points...")
+    chunk_size = 256
+    xyz, scale, rot, sh_0, sh_rest, opacity = cluster_utils.cluster_points(chunk_size, xyz, scale, rot, sh_0, sh_rest, opacity)
+
+    # Prepare default params
+    op = arguments.OptimizationParams.get_class_default_obj()
+    pp = arguments.PipelineParams.get_class_default_obj()
+
     # Output directories
     output_dir = os.path.join(args.source_path, "masks")
     os.makedirs(output_dir, exist_ok=True)
@@ -90,30 +129,26 @@ def main():
                         else:
                             mask_to_use = mask_np
                         
-                        # Create RGBA image
-                        # color = orig_np (RGB)
-                        # alpha = mask_to_use (L) - we use the mask as the alpha channel
-                        
-                        # Ensure mask is single channel for alpha concatenation if it's not already
+                        # Ensure mask is single channel
                         if mask_to_use.ndim == 3 and mask_to_use.shape[2] == 3:
-                             # If mask was RGB (white on black), take one channel
                              alpha_channel = mask_to_use[:, :, 0]
                         else:
                              alpha_channel = mask_to_use
-    
-                        # orig_np is (H, W, 3), alpha_channel is (H, W) or (H, W, 1)
+
                         if alpha_channel.ndim == 2:
                             alpha_channel = alpha_channel[:, :, np.newaxis]
                         
-                        rgba_np = np.concatenate([orig_np, alpha_channel], axis=2) # (H, W, 4)
-                        
-                        masked_img_final = (rgba_np * 255).astype(np.uint8)
-                        masked_img_pil = Image.fromarray(masked_img_final, mode='RGBA')
+                        # apply mask (black background)
+                        # mask=1 -> keep original, mask=0 -> black
+                        masked_img_np = orig_np * alpha_channel
+
+                        masked_img_final = (masked_img_np * 255).astype(np.uint8)
+                        masked_img_pil = Image.fromarray(masked_img_final, mode='RGB')
                         
                         masked_save_path = os.path.join(masked_images_dir, img_name)
-                        # Ensure png extension for transparency support
-                        masked_save_path = os.path.splitext(masked_save_path)[0] + ".png"
-                        masked_img_pil.save(masked_save_path)
+                        # Ensure jpg extension
+                        masked_save_path = os.path.splitext(masked_save_path)[0] + ".jpg"
+                        masked_img_pil.save(masked_save_path, quality=95)
                     else:
                         # Just print warning, don't crash thread
                         pass

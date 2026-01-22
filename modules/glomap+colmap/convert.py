@@ -276,6 +276,13 @@ def main():
         except Exception as e:
             print(f"Warning: Failed to remove {tem_params_dir}: {e}")
 
+    print("\n[Post-Processing] Verifying sparse directory structure...")
+    for frame_dir in output_root.iterdir():
+        if frame_dir.is_dir():
+            sparse_dir = frame_dir / "sparse"
+            if sparse_dir.exists():
+                ensure_model_structure(sparse_dir)
+
     print("\nAll Done!")
 
 if __name__ == "__main__":

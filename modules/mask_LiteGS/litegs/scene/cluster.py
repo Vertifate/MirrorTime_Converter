@@ -23,7 +23,7 @@ def cluster_points(chunksize,*args:torch.Tensor) -> tuple[torch.Tensor, ...]:
 def uncluster(*args:torch.Tensor)->tuple[torch.Tensor, ...]:
     output=[]
     for input in args:
-        output.append(input.view(*input.shape[:-2],input.shape[-1]*input.shape[-2]))
+        output.append(input.reshape(*input.shape[:-2],input.shape[-1]*input.shape[-2]))
     return *output,
 
 @torch.no_grad()

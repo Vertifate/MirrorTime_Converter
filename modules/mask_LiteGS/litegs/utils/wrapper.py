@@ -190,6 +190,33 @@ class CreateTransformMatrix(BaseWrapper):
                 grad_quaternion,grad_scale=litegs_fused.createTransformMatrix_backward(grad_transform_matrix,quaternion,scale)
                 return grad_quaternion,grad_scale
             
+            
+        # Debug: Check shapes using tqdm.write to bypass progress bar buffering
+        # from tqdm import tqdm
+        # tqdm.write(f"DEBUG: __create_transform_matrix_fused inputs - scaling_vec: {scaling_vec.shape}, rotator_vec: {rotator_vec.shape}")
+        
+        if scaling_vec.dim() == 1:
+            scaling_vec = scaling_vec.unsqueeze(0)
+        elif scaling_vec.dim() > 2:
+            # If tensor has extra singleton dimensions (e.g. [1, 3, N] or [3, 1, N]), squeeze them
+            if scaling_vec.shape[0] == 1:
+                 scaling_vec = scaling_vec.squeeze(0)
+            elif scaling_vec.shape[1] == 1:
+                 scaling_vec = scaling_vec.squeeze(1)
+            # Fallback: flatten to 2D if possible (e.g. [C, N])
+            if scaling_vec.dim() > 2:
+                scaling_vec = scaling_vec.reshape(scaling_vec.shape[-2], -1) 
+
+        if rotator_vec.dim() == 1:
+            rotator_vec = rotator_vec.unsqueeze(0)
+        elif rotator_vec.dim() > 2:
+             if rotator_vec.shape[0] == 1:
+                 rotator_vec = rotator_vec.squeeze(0)
+             elif rotator_vec.shape[1] == 1:
+                 rotator_vec = rotator_vec.squeeze(1)
+             if rotator_vec.dim() > 2:
+                 rotator_vec = rotator_vec.reshape(rotator_vec.shape[-2], -1)
+
         transform_matrix=CreateTransformMatrixFunc.apply(rotator_vec,scaling_vec)
         return transform_matrix
 

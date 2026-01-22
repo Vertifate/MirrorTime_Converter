@@ -30,12 +30,12 @@ def parse_args():
     
     # 训练控制
     parser.add_argument("--skip_train", action="store_true", help="跳过训练阶段")
-    parser.add_argument("--iterations", type=int, default=20000)
+    parser.add_argument("--iterations", type=int, default=10000)
     parser.add_argument("--sh_degree", type=int, default=3)
     
     # 清理控制
     parser.add_argument("--skip_clean", action="store_true", help="跳过清理阶段")
-    parser.add_argument("--clean_scale", type=float, default=0.8, help="清理裁剪半径比例")
+    parser.add_argument("--clean_scale", type=float, default=0.75, help="清理裁剪半径比例")
     parser.add_argument("--camera_radius", type=float, default=0.1, help="相机避让半径比例")
     
     # Mask 生成控制
@@ -87,6 +87,11 @@ def main():
     
     env = os.environ.copy()
     env.setdefault("QT_QPA_PLATFORM", "offscreen")
+    
+    # Add project root to PYTHONPATH so subprocesses can find 'litegs'
+    project_root = str(root_dir)
+    current_pythonpath = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = f"{project_root}{os.pathsep}{current_pythonpath}"
 
     frames = find_frames(base_dir)
     print(f"Found {len(frames)} frames in {base_dir}")
