@@ -115,7 +115,7 @@ class PipelineManager:
     def run_synchronization(self):
         """步骤1: 运行同步计算或应用默认值"""
         print("\n" + "="*30)
-        print("步骤 1/3: 视频时间同步与对齐")
+        print("步骤 1/3: 全局时间轴计算")
         print("="*30)
 
         if not self.use_sync:
@@ -229,7 +229,7 @@ class PipelineManager:
     def run_frame_extraction(self):
         """步骤2 & 3: 从全局时间轴逆算并提取"""
         print("\n" + "="*30)
-        print("步骤 2/3: 计算抽帧计划与准备")
+        print("步骤 2/3: 准备抽帧计划")
         print("="*30)
 
         # 全局时间点
