@@ -5,7 +5,7 @@ class ProgressTqdm(tqdm):
     A wrapper around tqdm that triggers a callback on update.
     This allows syncing CLI progress bars with UI/WebSockets.
     """
-    def __init__(self, iterable=None, progress_callback=None, progress_scale=(0.0, 100.0), *args, **kwargs):
+    def __init__(self, iterable=Nodene, progress_callback=None, progress_scale=(0.0, 100.0), *args, **kwargs):
         """
         :param progress_callback: func(percent: float) -> void. 
                                   Note: Ensure this callback is thread-safe if used in threads.
